@@ -129,19 +129,33 @@ Dilating the convolutions took micro from 47.2% to 91.1% with fewer parameters.
 
 ## Status
 
-**10 September 2026 — the pipeline is built and measured; the artifacts are not finished.**
+**10 September 2026 — the pipeline is built, three artifacts ship, and the class ladder measures
+something.**
 
-Working end to end: the environment client, the generated adapter (245,839 operations at the worst
-reference board, 24% of the budget), the conformance test, the teacher, dataset collection
-(250,000 seat-turns and 7.4 million ant labels in nine minutes), behaviour cloning on MPS, and
-export with the platform's own verdict.
+| | class | parameters | S | reach | agreement | on the ladder |
+|---|---|---:|---:|---:|---:|---|
+| `micro-bc` | micro | 24,001 | 45,642 (70% of cap) | 15 | 93.8% | yes |
+| `nano-bc` | nano | 2,930 | 6,007 (73% of cap) | 15 | 85.8% | yes |
+| `micro-percell` | micro | 24,953 | 45,942 (70% of cap) | 0 | 40.7% | the control |
 
-Measured and settled: **fp16 initializers give 2.03x the parameters for the same weight class** with
-identical play; **the turn deadline binds before the byte cap above `mini`**, and `small` reaches its
-31.2 ms seat share at about a quarter of its cap.
+micro takes nano two to one over 24 matches, which is the size/fidelity curve the weight classes
+exist to measure. Both are distilled from one deterministic teacher over 250,000 seat-turns and
+7.4 million ant decisions.
 
-Not built: the `large` class (no dense architecture reaches its cap inside the deadline — the plan
-is a learned pattern table), PPO self-play, the method column, and the platform seeding.
+Verified end to end on a live stack: seeded, resident on both fleet replicas, claimed by the wave,
+523 turns played with zero strikes, replay uploaded, rated 25.00 → 29.40, and visible through
+`GET /v1/models/{id}` with its measured `infer_us`.
+
+Settled by measurement: **fp16 initializers give 2.03x the parameters** for the same class with
+identical play; **the turn deadline binds before the byte cap above `mini`**; and **receptive field,
+not capacity, was the thing worth spending on** — see [`docs/receptive-field.md`](docs/receptive-field.md),
+which is the document to read first.
+
+Not built: PPO self-play is written and smoke-tested but has never run long enough to learn
+anything; `small` has no trained artifact; `large` has no architecture at all, because nothing dense
+reaches its cap inside a seat's deadline share. The teacher forages and rarely razes, so what the
+ladder currently distils is a forager.
+
 
 ## More
 

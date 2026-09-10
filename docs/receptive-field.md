@@ -89,6 +89,32 @@ The colony number is the one to keep. **31.6 ants a seat against the teacher's 3
 24,000-parameter network recovers essentially all of the teacher's food economy, and at reach 2 a
 larger one recovered a third of it. Nothing about the byte budget changed between those two rows.
 
+## Reach is a threshold, not a gradient
+
+A third model settles what the first two only suggested. `percell` is 1x1 convolutions only — the
+same seven values at the cell an ant stands on, nothing about its neighbours — sized to 24,953
+parameters against the dilated trunk's 24,001, so the three differ in reach and in nothing else that
+matters. Thirty-six matches, three presets, both seat orders:
+
+| | parameters | reach | agreement | W–D–L | win rate |
+|---|---:|---:|---:|---|---:|
+| micro, dilated | 24,001 | **15** | 93.8% | 34–2–0 | **97%** |
+| micro, plain | 26,453 | 2 | 47.2% | 5–10–21 | 28% |
+| micro, per-cell | 24,953 | **0** | 40.7% | 4–10–22 | 25% |
+
+**Two cells of context is worth three points of win rate over none at all.** The plain trunk sees its
+ant's immediate neighbours and plays almost exactly like a model that sees nothing — and the per-cell
+model never moved off 40.7% across five epochs, which is what a network looks like when it has
+extracted everything its input contains by the end of the first pass.
+
+So this is not a curve you can walk up. Below the scale of the thing you need to see, context buys
+nothing: food is rarely on the square next to you, and an enemy two cells away is already on top of
+you. Fifteen cells covers the view radius (radius² 77, so 8.8 cells) with room to head somewhere,
+and that is where the model stops guessing and starts playing.
+
+The practical form of it: **do not tune reach a layer at a time and conclude it does not help.**
+Going from one 3x3 to two would have moved this from 25% to 28% and looked like a dead end.
+
 ## Why this belongs in a repository about weight classes
 
 Because it is the thing a competitor will get wrong, and the class table will not warn them. The
@@ -98,3 +124,7 @@ parameter count is made of.
 
 Reach is nearly free. It is layers and dilation, and at nine channels a layer costs almost nothing.
 Buying it with width is the trade, and until this was measured the trade was being made backwards.
+
+And the failure is quiet. A model with too small a window trains, exports, passes admission, plays
+legal matches and loses — the loss curve flattens early and looks converged, the accuracy sits well
+above chance, and nothing anywhere says *your ant cannot see the food*.

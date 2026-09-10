@@ -1,0 +1,29 @@
+{
+  "class": "micro",
+  "size_metric_bytes": 45942,
+  "class_max_bytes": 65536,
+  "class_target_bytes": 45875,
+  "fill_of_cap": 0.701,
+  "weights_zstd_bytes": 45548,
+  "adapter_zstd_bytes": 394,
+  "params": 24953,
+  "opset": 17,
+  "operators": [
+    "Cast",
+    "Conv",
+    "Relu"
+  ],
+  "adapter_ops_max": 245839,
+  "adapter_ops_budget": 1000000,
+  "infer_us_max": 10750,
+  "deadline_share_ms": 31.25,
+  "share_used": 0.344,
+  "target_fraction": 0.7,
+  "engine_digest": "sha256:f17b51b6c92b066d9a354578b2774e98d88ddcece1db3ac7aa6b3e3271d72865",
+  "evaluator_digest": "sha256:44cfc91cb1f20f9a4b46d742169c22f970a96801faa843416f4d6776c9b3c505",
+  "weights_hash": "sha256:85713895274b6d1040ab14205c6f9e00eaf3657c6ed61c10444d6acabfcae193",
+  "adapter_hash": "sha256:9c022ff50c7210213afa4a88ffb56cd2dee188f99b949335a037bdc60ab2d468",
+  "arch": "PerCell",
+  "reach_cells": 0,
+  "dilations": null
+}
