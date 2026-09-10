@@ -231,6 +231,7 @@ CARD = """# {name}
 |---|---|
 | Weight class | **{cls}** — {size:,} of {cap:,} bytes ({fill:.0%} of the cap) |
 | Parameters | {params:,} ({dtype} initializers) |
+| Architecture | `{arch}`, receptive field **{reach} cells** each way{dil} |
 | Method | {method} |
 | Adapter | {ops:,} of {opsmax:,} operations at its worst reference case |
 | Inference | {infer:.2f} ms at the worst reference case — **{shareuse:.0%}** of a {share:.1f} ms seat share |
@@ -257,6 +258,9 @@ def write_card(out: Path, name: str, method: str, metrics: dict, summary: str,
         size=metrics["size_metric_bytes"], cap=metrics["class_max_bytes"],
         fill=metrics["fill_of_cap"], params=metrics["params"],
         dtype=classes()["_"]["dtype"]["default"], method=method,
+        arch=metrics.get("arch", "?"), reach=metrics.get("reach_cells", 0),
+        dil=(f" (dilations {metrics['dilations'][0]})"
+             if metrics.get("dilations") else ""),
         ops=metrics["adapter_ops_max"], opsmax=metrics["adapter_ops_budget"],
         infer=metrics["infer_us_max"] / 1000, share=metrics["deadline_share_ms"],
         shareuse=metrics["share_used"],
@@ -264,6 +268,23 @@ def write_card(out: Path, name: str, method: str, metrics: dict, summary: str,
         evaluator=metrics["evaluator_digest"], whash=metrics["weights_hash"],
         ahash=metrics["adapter_hash"], notes=notes, repro=repro,
     ))
+
+
+def shape_of(trunk: torch.nn.Module) -> dict:
+    """The architecture, as the card and metrics record it.
+
+    **A stale artifact directory is self-consistent**: its model, adapter and metrics all agree with
+    each other and every hash check passes, so nothing notices that it was built by a version of
+    this repository that no longer exists. It nearly shipped one -- a `nano-bc` from before the
+    receptive-field fix, sitting beside a `micro-bc` from after it. Writing the architecture down is
+    what makes that visible at a glance rather than by counting parameters.
+    """
+    stages = [m for m in trunk.modules() if type(m).__name__ == "Stage"]
+    return {
+        "arch": type(trunk).__name__,
+        "reach_cells": max((st.reach for st in stages), default=0),
+        "dilations": [st.dilations for st in stages] or None,
+    }
 
 
 def export(trunk: torch.nn.Module, name: str, out: Path, method: str,
@@ -278,7 +299,7 @@ def export(trunk: torch.nn.Module, name: str, out: Path, method: str,
 
     said = verdict(model_path, adapter_path)
     problems = certify(name, said)
-    metrics = report(name, said)
+    metrics = report(name, said) | shape_of(trunk)
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
     write_card(out, out.name, method, metrics,
                summary or f"A {name}-class Ants policy.", notes, repro or "see README.md")

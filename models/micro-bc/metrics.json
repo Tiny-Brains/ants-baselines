@@ -18,12 +18,22 @@
   ],
   "adapter_ops_max": 245839,
   "adapter_ops_budget": 1000000,
-  "infer_us_max": 14238,
+  "infer_us_max": 14328,
   "deadline_share_ms": 31.25,
-  "share_used": 0.4556,
+  "share_used": 0.4585,
   "target_fraction": 0.7,
   "engine_digest": "sha256:f17b51b6c92b066d9a354578b2774e98d88ddcece1db3ac7aa6b3e3271d72865",
   "evaluator_digest": "sha256:44cfc91cb1f20f9a4b46d742169c22f970a96801faa843416f4d6776c9b3c505",
   "weights_hash": "sha256:1e51646a3987eb7844a7cd8e9c3f12f36d2a5d5a678286d856ac1c1be9801268",
-  "adapter_hash": "sha256:9c022ff50c7210213afa4a88ffb56cd2dee188f99b949335a037bdc60ab2d468"
+  "adapter_hash": "sha256:9c022ff50c7210213afa4a88ffb56cd2dee188f99b949335a037bdc60ab2d468",
+  "arch": "Trunk",
+  "reach_cells": 15,
+  "dilations": [
+    [
+      1,
+      2,
+      4,
+      8
+    ]
+  ]
 }
