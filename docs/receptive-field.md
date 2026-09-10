@@ -57,13 +57,37 @@ would need sixteen layers to get there.
 | | channels | layers | dilations | parameters | reach | S | of a seat share |
 |---|---:|---:|---|---:|---:|---:|---:|
 | nano | 9 | 4 | 1,2,4,8 | 2,930 | 15 | 5,785 (71% of cap) | 9% |
-| micro | 28 | 4 | 1,2,4,8 | 24,001 | 15 | 44,008 (67% of cap) | 43% |
+
+(Sizes are the trained artifacts'. Trained weights compress slightly *worse* than random ones —
+micro measured 44,008 bytes untrained and 45,642 trained — which is worth knowing before sizing a
+model to the last kilobyte of its class.)
+| micro | 28 | 4 | 1,2,4,8 | 24,001 | 15 | 45,642 (70% of cap) | 46% |
 
 **Nano went from 30 channels to 9** — a third of the width — to pay for four layers instead of one.
 Micro went from 48 to 28. Both got smaller in every dimension except the one that mattered.
 
 The first epoch of the retrained micro answered the question on its own: **held-out agreement went
-from 47.2% to 91.1%**, against a floor of 38.1%, on the same data with fewer parameters.
+from 47.2% to 91.1%**, against a floor of 38.1%, on the same data with fewer parameters. Five epochs
+finished at **93.8%**.
+
+## And then they played each other
+
+Twenty-four matches, every pair of the three presets' first four boards, both seat orders.
+
+| | parameters | S | agreement | peak colony | W–D–L |
+|---|---:|---:|---:|---:|---|
+| micro, reach 15 | 24,001 | 45,642 (70% of cap) | 93.8% | **31.6** | **19–5–0** |
+| micro, reach 2 | 26,453 | 50,143 (77% of cap) | 47.2% | 10.7 | 0–5–19 |
+
+Mean score 2.58 against 0.21. A match starts every seat on one point and the only way up is razing
+an enemy hill, so the wide-but-blind model was **losing hills faster than it took them** while the
+dilated one takes them — and the end reasons say the same thing: eleven matches settled early on
+rank, eight by extermination, and only three of the twenty-four stalled into `idle_food`, which was
+the dominant ending before.
+
+The colony number is the one to keep. **31.6 ants a seat against the teacher's 32.9**: at reach 15 a
+24,000-parameter network recovers essentially all of the teacher's food economy, and at reach 2 a
+larger one recovered a third of it. Nothing about the byte budget changed between those two rows.
 
 ## Why this belongs in a repository about weight classes
 
