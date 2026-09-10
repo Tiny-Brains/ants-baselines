@@ -58,7 +58,7 @@ import torch.nn.functional as F
 from .. import nets
 from ..env import Env, orders_from_indices
 from ..export import budget, classes
-from ..planes import N_MOVES, encode
+from ..planes import N_MOVES
 from .bc import device
 
 
@@ -86,6 +86,9 @@ class Trajectory:
     is not."""
 
     obs: list[dict] = field(default_factory=list)
+    # The encoded board, kept from the rollout. `encode` is not free and the update would otherwise
+    # redo it once per epoch for every sample -- work that was already done to choose the action.
+    boards: list[np.ndarray] = field(default_factory=list)
     actions: list[np.ndarray] = field(default_factory=list)
     logp: list[np.ndarray] = field(default_factory=list)
     values: list[float] = field(default_factory=list)
@@ -132,7 +135,9 @@ class Runner:
         t = torch.from_numpy(boards).to(self.dev)
         logits, values = self.model(t)
         per_ant = logits[rows.board, :, rows.r, rows.c]
-        dist = torch.distributions.Categorical(logits=per_ant)
+        # validate_args=False: the checks cost 8% of the whole loop proving that a tensor of
+        # logits is a tensor of logits, on every construction, on every minibatch.
+        dist = torch.distributions.Categorical(logits=per_ant, validate_args=False)
         picks = dist.sample()
         return picks.cpu().numpy(), dist.log_prob(picks).cpu().numpy(), values.cpu().numpy()
 
@@ -154,7 +159,8 @@ class Runner:
                     seat = self.step.seats[i]
                     mine = picks[at : at + n]
                     actions[i] = orders_from_indices(mine, [n])[0]
-                    self._record(seat, mine, logp[at : at + n], float(values[k]))
+                    self._record(seat, group.boards[k : k + 1], mine,
+                                 logp[at : at + n], float(values[k]))
                     at += n
 
             prev = self.step
@@ -168,12 +174,13 @@ class Runner:
             "mean_return": float(np.mean(self.returns)) if self.returns else 0.0,
         }
 
-    def _record(self, seat, picks, logp, value) -> None:
+    def _record(self, seat, board, picks, logp, value) -> None:
         key = (seat.ep, seat.seat)
         traj = self.open.setdefault(key, Trajectory())
         if not traj.obs:
             traj.last_ants = len(seat.obs["mine"])
         traj.obs.append(seat.obs)
+        traj.boards.append(board)
         traj.actions.append(picks.copy())
         traj.logp.append(logp.copy())
         traj.values.append(value)
@@ -272,16 +279,17 @@ def update(model, opt, batch: list[Trajectory], r: Reward, dev, epochs: int,
         for t in range(len(traj.obs)):
             if len(traj.actions[t]) == 0:
                 continue
-            samples.append((traj.obs[t], traj.actions[t], traj.logp[t], adv[t], ret[t]))
+            samples.append((traj.obs[t], traj.boards[t], traj.actions[t], traj.logp[t],
+                            adv[t], ret[t]))
     if not samples:
         return {"samples": 0}
 
-    advs = np.array([s[3] for s in samples], dtype=np.float32)
+    advs = np.array([s[4] for s in samples], dtype=np.float32)
     advs = (advs - advs.mean()) / (advs.std() + 1e-8)
 
     by_size: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for i, s in enumerate(samples):
-        by_size[tuple(s[0]["size"])].append(i)
+    for i, sample in enumerate(samples):
+        by_size[tuple(sample[0]["size"])].append(i)
 
     stats = defaultdict(float)
     batches = 0
@@ -290,39 +298,37 @@ def update(model, opt, batch: list[Trajectory], r: Reward, dev, epochs: int,
             order = np.random.permutation(len(group))
             for start in range(0, len(order), minibatch):
                 chunk = [group[j] for j in order[start : start + minibatch]]
-                boards = np.concatenate([encode(samples[i][0]) for i in chunk], axis=0)
-                bt = torch.from_numpy(boards).to(dev)
+                bt = torch.from_numpy(np.concatenate([samples[i][1] for i in chunk], 0)).to(dev)
 
                 b_idx, rr, cc, acts, olp, adv_rep = [], [], [], [], [], []
                 rets = []
                 for k, i in enumerate(chunk):
-                    obs, a, lp, _, ret = samples[i]
-                    for (row, col) in obs["mine"]:
-                        b_idx.append(k)
-                        rr.append(row)
-                        cc.append(col)
+                    obs, _, a, lp, _, ret = samples[i]
+                    mine = np.asarray(obs["mine"], dtype=np.int64).reshape(-1, 2)
+                    b_idx.append(np.full(len(mine), k, dtype=np.int64))
+                    rr.append(mine[:, 0])
+                    cc.append(mine[:, 1])
                     acts.append(a)
                     olp.append(lp)
                     adv_rep.append(np.full(len(a), advs[i], dtype=np.float32))
                     rets.append(ret)
 
+                nd = lambda parts, dt: torch.from_numpy(
+                    np.concatenate(parts).astype(dt, copy=False)).to(dev)
                 logits, values = model(bt)
-                per_ant = logits[
-                    torch.tensor(b_idx, device=dev), :,
-                    torch.tensor(rr, device=dev), torch.tensor(cc, device=dev),
-                ]
-                dist = torch.distributions.Categorical(logits=per_ant)
-                a_t = torch.tensor(np.concatenate(acts), dtype=torch.long, device=dev)
+                per_ant = logits[nd(b_idx, np.int64), :, nd(rr, np.int64), nd(cc, np.int64)]
+                dist = torch.distributions.Categorical(logits=per_ant, validate_args=False)
+                a_t = nd(acts, np.int64)
                 new_lp = dist.log_prob(a_t)
-                old_lp = torch.tensor(np.concatenate(olp), dtype=torch.float32, device=dev)
-                adv_t = torch.tensor(np.concatenate(adv_rep), dtype=torch.float32, device=dev)
+                old_lp = nd(olp, np.float32)
+                adv_t = nd(adv_rep, np.float32)
 
                 ratio = torch.exp(new_lp - old_lp)
                 policy_loss = -torch.min(
                     ratio * adv_t, torch.clamp(ratio, 1 - clip, 1 + clip) * adv_t
                 ).mean()
                 value_loss = F.mse_loss(
-                    values, torch.tensor(rets, dtype=torch.float32, device=dev)
+                    values, torch.from_numpy(np.asarray(rets, dtype=np.float32)).to(dev)
                 )
                 ent = dist.entropy().mean()
                 loss = policy_loss + 0.5 * value_loss - entropy * ent
