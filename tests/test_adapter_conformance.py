@@ -109,3 +109,41 @@ def test_the_encoder_handles_an_empty_colony():
     board = planes.encode(obs)
     assert board.shape == (1, planes.N_PLANES, 64, 96)
     assert board.sum() == 0, "nothing seen, nothing set -- including the visibility mask"
+
+
+def test_the_action_table_is_the_channel_order_the_loss_trains():
+    """The `out` program's move table must be `planes.MOVES`, in that order.
+
+    Channel `i` of the policy head means `MOVES[i]` because that is the index the cross-entropy
+    label uses (`train/bc.py`'s `MOVE_INDEX`) and the index `orders_from_indices` writes back. The
+    adapter closes the loop by argmaxing the channels and indexing its own table — so if that table
+    were reordered, every move would be systematically wrong while the model, the loss, the replay
+    and the match all continued to work. Nothing else would notice.
+
+    The conformance test above covers the `in` program, where a mistake shows up as a tensor
+    mismatch. This is the `out` side, where a mistake shows up as a lower rating and nothing else.
+    """
+    doc = json.loads(adapters.dumps())
+    tables = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "tb.at" and isinstance(value, list) and isinstance(value[0], list):
+                    tables.append(value[0])
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(doc["out"])
+    assert tables == [list(planes.MOVES)], (
+        f"the adapter decodes {tables} where the policy head is trained as {list(planes.MOVES)}"
+    )
+
+
+def test_the_out_program_reads_the_output_the_export_names():
+    """`export.to_onnx` names the graph's output `policy`, and the `out` program reads
+    `outputs.policy`. A rename on one side is a `SHAPE_MISMATCH` at admission, which is a clear
+    failure — but only if someone runs admission, and this is cheaper."""
+    assert '"outputs.policy"' in adapters.dumps()
