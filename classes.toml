@@ -53,13 +53,25 @@ default = "fp16"
 ## itself and gets many shares -- which is exactly why a baseline must be sized to the COMPETITOR's
 ## budget. A reference that only fits because it is a baseline is not a reference.
 ##
-## 185 GFLOP/s is this machine: 6,653 parameters over 128x128 measured at 1.18 ms a seat-turn, so
-## 6653 x 2 x 16384 / 1.18e-3. Single-threaded, as `devops/cli` runs axon; the fleet gives axon
-## cores-1 threads, so this is the conservative end.
+## 70 GFLOP/s is this machine, measured on the artifacts themselves at the WORST reference board
+## (128x128, which is what `infer_us_max` reports):
+##
+##   micro-bc      24,001 params  14.33 ms  ->  55 GFLOP/s   full resolution
+##   micro-percell 24,953 params  10.75 ms  ->  76           full resolution, 1x1 only
+##   mini probe   196,149 params  21.09 ms  ->  76           bulk at stride 2
+##   small probe  633,829 params  18.37 ms  ->  71           bulk at stride 4
+##
+## An earlier version of this file said 1.85e11, from `ants-dense` at 1.18 ms a seat-turn. That was
+## wrong by about three times and the mistake is worth naming: 1.18 ms was the MEAN over a wave
+## whose boards were mostly `standard` (64x96, 2.7x fewer cells), compared against a budget that has
+## to hold at the LARGEST board. The same fixture measures 3.54 ms at 128x128 -- 62 GFLOP/s, which
+## agrees with everything above.
 turn_ms = 1000
 rows_per_call = 32
-flops_per_second = 1.85e11
-## => 5.8 GFLOP a seat-turn => 177,000 parameters fully-convolutional at 128x128, the largest board.
+flops_per_second = 7.0e10
+## => 2.2 GFLOP a seat-turn => about 67,000 parameters fully-convolutional at 128x128. So `micro` is
+## already near the full-resolution ceiling, not `mini` -- every architecture in this file was right
+## while the constant explaining them was not.
 
 ## ---------------------------------------------------------------------------------------------
 ## The five classes. `max_bytes` is the platform's (soma/migrations/0001_init.sql, per season);
