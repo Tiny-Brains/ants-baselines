@@ -173,9 +173,28 @@ def run_epoch(model, rows, chunks, dev, opt=None) -> tuple[float, float, int]:
     return total_loss / max(seen, 1), correct / max(seen, 1), seen
 
 
+def override(spec: dict, args) -> dict:
+    """The class's entry, with anything named on the command line replacing it."""
+    spec = dict(spec)
+    for key in ("arch", "channels", "blocks"):
+        value = getattr(args, key, None)
+        if value is not None:
+            spec[key] = value
+    # `percell` and `trunk` take no stride; leaving one behind would be passed to a constructor that
+    # does not accept it, at the end of a long training run rather than the start.
+    if spec.get("arch") in ("trunk", "percell"):
+        spec.pop("stride", None)
+    return spec
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--class", dest="cls", required=True)
+    # A variant is a command line, not a second table: the run's history.json and the model card
+    # both record what was actually built, which is the copy that matters.
+    ap.add_argument("--arch", default=None, help="override the class's architecture")
+    ap.add_argument("--channels", type=int, default=None)
+    ap.add_argument("--blocks", type=int, default=None)
     ap.add_argument("--data", type=Path, default=Path("data/teacher.jsonl.gz"))
     ap.add_argument("--epochs", type=int, default=6)
     ap.add_argument("--batch", type=int, default=32)
@@ -196,7 +215,7 @@ def main(argv: list[str] | None = None) -> None:
     cut = int(len(order) * (1 - a.holdout))
     train_idx, val_idx = order[:cut], order[cut:]
 
-    spec = classes()[a.cls]
+    spec = override(classes()[a.cls], a)
     model = nets.build(spec).to(dev)
     b = budget(a.cls)
     print(f"{a.cls}: {nets.policy_params(model):,} parameters "
@@ -229,7 +248,8 @@ def main(argv: list[str] | None = None) -> None:
                         "engine_digest": header["engine_digest"]}, out / "best.pt")
 
     (out / "history.json").write_text(json.dumps(
-        {"class": a.cls, "method": "bc", "data": str(a.data), "epochs": history,
+        {"class": a.cls, "method": "bc", "arch": spec["arch"], "spec": spec,
+         "data": str(a.data), "epochs": history,
          "engine_digest": header["engine_digest"], "device": dev.type}, indent=2) + "\n")
     print(f"  -> {out / 'best.pt'}  (best held-out loss {best:.4f})")
     print("  accuracy against the teacher is not strength. Play it: `python -m tb_baselines.eval`")

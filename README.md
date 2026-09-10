@@ -17,9 +17,14 @@ Same data, same labels, same loss; only the budget changes. That is the size/fid
 is the reason the classes exist.
 
 **The method column** takes one class and one dataset and changes only the learner. That is the
-comparison worth making — a linear model, a convolutional trunk and a reinforcement learner on
+comparison worth making — a per-cell model, a convolutional trunk and a reinforcement learner on
 identical data say something about the algorithms; the same three at different budgets say nothing
 about either.
+
+The control in that column is worth naming: `percell` is 1x1 convolutions only, matched to the
+convolutional trunk's parameter count to within 1%, so it has the same capacity and **no receptive
+field at all**. The gap between them is what looking around is worth in this game, measured rather
+than asserted.
 
 They do not cross because compute does not scale with bytes. Above `mini` the **turn deadline**
 binds long before the byte cap does, and `large`'s cap is out of reach of any dense architecture.

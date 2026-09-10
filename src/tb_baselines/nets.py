@@ -133,7 +133,38 @@ class EncDec(nn.Module):
         return self.head(self.features(board.float()))
 
 
-ARCHS = {"trunk": Trunk, "encdec": EncDec}
+class PerCell(nn.Module):
+    """1x1 convolutions only: the same capacity with **no receptive field at all**.
+
+    This is the method column's control. It sees exactly the seven values at the cell its ant stands
+    on — is there water here, a hill, an ant of mine — and nothing about what is next to it, so it
+    cannot follow a food trail, avoid a fight or head for a frontier. Give it the same class, the
+    same dataset and roughly the same parameter count as `Trunk` and the difference between them is
+    the receptive field and nothing else, which is the only way to say what spatial context is worth
+    in this game rather than to assert it.
+
+    A per-cell model is also the honest floor for the whole enterprise. If a convolutional trunk
+    cannot beat one, the trunk is not learning to look around.
+    """
+
+    def __init__(self, channels: int, blocks: int = 1, planes: int = N_PLANES,
+                 moves: int = N_MOVES):
+        super().__init__()
+        widths = [(planes, channels)] + [(channels, channels)] * blocks
+        self.layers = nn.ModuleList([nn.Conv2d(a, b, 1) for a, b in widths])
+        self.head = nn.Conv2d(channels, moves, 1)
+        self.channels = channels
+
+    def features(self, x):
+        for layer in self.layers:
+            x = F.relu(layer(x))
+        return x
+
+    def forward(self, board):
+        return self.head(self.features(board.float()))
+
+
+ARCHS = {"trunk": Trunk, "encdec": EncDec, "percell": PerCell}
 
 
 def build(spec: dict) -> nn.Module:

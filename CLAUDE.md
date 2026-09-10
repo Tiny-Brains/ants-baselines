@@ -43,6 +43,7 @@ pytest tests/ -q                                   # THE test. See "What must st
 python -m tb_baselines.adapters > /tmp/a.json      # the generated adapter
 python -m tb_baselines.collect --seat-turns 250000 # the teacher dataset (about 9 minutes, 90 MB)
 python -m tb_baselines.train.bc --class micro --epochs 6
+python -m tb_baselines.train.bc --class micro --arch percell --channels 112 --blocks 2  # the control
 python -m tb_baselines.export --class micro --weights runs/micro-bc/best.pt --out models/micro-bc
 python -m tb_baselines.eval models/micro-bc models/nano-bc --boards 3
 ```
@@ -73,6 +74,9 @@ env. Never report a result from the env as a result.
   the conformance test exists to catch, and a hand-edit is how it gets reintroduced.
 - **Numbers in `classes.toml` are measured, and the measurement is written down beside them.**
   Nothing there is a guess. When something is re-measured, replace the number *and* its note.
+- **A variant is a command line, not a second table.** `--arch/--channels/--blocks` override the
+  class's entry, and the run's `history.json` and the model card record what was actually built.
+  `classes.toml` stays the five classes and does not grow a row per experiment.
 - **The teacher is a label source, not a baseline.** It never ships. The class ladder is only
   meaningful if every class distils the *same* teacher, so changing it invalidates the comparison —
   regenerate the whole dataset and retrain everything, or don't change it.

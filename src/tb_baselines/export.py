@@ -294,12 +294,18 @@ def export(trunk: torch.nn.Module, name: str, out: Path, method: str,
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--class", dest="cls", required=True)
+    # A variant is a command line, not a second table: the run's history.json and the model card
+    # both record what was actually built, which is the copy that matters.
+    ap.add_argument("--arch", default=None, help="override the class's architecture")
+    ap.add_argument("--channels", type=int, default=None)
+    ap.add_argument("--blocks", type=int, default=None)
     ap.add_argument("--weights", type=Path, help="a .pt state dict; omitted means random init")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--method", default="untrained")
     a = ap.parse_args(argv)
 
-    spec = classes()[a.cls]
+    from .train.bc import override
+    spec = override(classes()[a.cls], a)
     trunk = nets.build(spec)
     if a.weights:
         state = torch.load(a.weights, map_location="cpu")
