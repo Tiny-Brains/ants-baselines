@@ -16,6 +16,18 @@ factor divides all three (they are all multiples of 32).
 So the ladder is not one architecture scaled up: `trunk` spends its parameters at full resolution,
 `encdec` moves the bulk to a stride where a parameter costs a quarter or a sixteenth as much.
 
+## Receptive field, not parameter count, was the binding constraint
+
+The first models trained here were `Trunk(channels=48, blocks=1)` — one 3x3 stem, one 3x3 block,
+then 1x1s. That is a **5x5 receptive field**: an ant could see two cells in each direction, and the
+teacher it was imitating plans over a flood 32 cells deep. Both nano and micro plateaued within one
+epoch at 44-47% agreement and played far below the teacher, growing colonies of 5 and 15 ants where
+the teacher grows 33 — and micro's extra parameters bought almost nothing, because the thing it
+lacked was not capacity.
+
+Dilation fixes it for free. `Conv` carries dilation as an attribute, so nothing new is allowlisted,
+and doubling it each layer reaches 31x31 in four layers where an undilated stack would need sixteen.
+
 The value head is **training only and never exported**. It is a genuine saving — at nano it would be
 a third of the budget — and it is also the honest place to put privileged input: a critic may see
 the true score (`tinybrains env --scores every`), because a critic is discarded before anything
@@ -56,16 +68,34 @@ def wrap(x: torch.Tensor, k: int) -> torch.Tensor:
 class Stage(nn.Module):
     """A run of unpadded 3x3 convolutions, wrapped once at the front.
 
-    The board comes out the size it went in, because `n` unpadded 3x3s shrink it by exactly the
-    `n` cells the wrap added.
+    The board comes out the size it went in, because a 3x3 at dilation `d` shrinks it by `2d` and
+    the wrap added `sum(dilations)` on every side.
+
+    **Dilation is why this class exists.** See the module docstring: a stack of ordinary 3x3s grows
+    its receptive field by two cells a layer, and the first models trained here could see two cells
+    and played like it. Doubling the dilation each layer grows it exponentially instead — 1, 2, 4, 8
+    reaches 31x31 in four layers — and costs nothing but the wider wrap. ONNX carries dilation as an
+    attribute of `Conv` rather than as its own operator, so it needs nothing the allowlist does not
+    already have: a dilated graph inspects as `Cast, Concat, Constant, Conv, Relu, Slice`.
     """
 
-    def __init__(self, widths: list[tuple[int, int]]):
+    def __init__(self, widths: list[tuple[int, int]], dilations: list[int] | None = None):
         super().__init__()
-        self.convs = nn.ModuleList([nn.Conv2d(a, b, 3, padding=0) for a, b in widths])
+        self.dilations = dilations or [1] * len(widths)
+        assert len(self.dilations) == len(widths)
+        self.convs = nn.ModuleList([
+            nn.Conv2d(a, b, 3, padding=0, dilation=d)
+            for (a, b), d in zip(widths, self.dilations)
+        ])
+
+    @property
+    def reach(self) -> int:
+        """How far a cell of the output can see, in cells. The number that decides whether a policy
+        can follow a trail or only feel the square it is on."""
+        return sum(self.dilations)
 
     def forward(self, x):
-        x = wrap(x, len(self.convs))
+        x = wrap(x, self.reach)
         for i, c in enumerate(self.convs):
             x = c(x)
             if i + 1 < len(self.convs):
@@ -73,18 +103,33 @@ class Stage(nn.Module):
         return F.relu(x)
 
 
+def doubling(n: int, cap: int = 8) -> list[int]:
+    """1, 2, 4, 8, 8, ... — dilations for `n` layers, stopped doubling at `cap`.
+
+    Past 8 the holes are wider than the food is dense and the kernel starts sampling noise, so the
+    tail repeats rather than continuing to double. Four layers reach 15 cells each way, which is
+    about the view radius (radius^2 77, so 8.8 cells) plus room to head somewhere.
+    """
+    return [min(cap, 1 << i) for i in range(n)]
+
+
 class Trunk(nn.Module):
     """Fully convolutional at full resolution: nano and micro.
 
-    One 3x3 stage, then 1x1 layers, which buy depth for a ninth of what a 3x3 costs — the right
-    trade when the whole budget is a few thousand parameters. No normalisation layer: at these
+    One dilated 3x3 stage, then 1x1 layers, which buy depth for a ninth of what a 3x3 costs — the
+    right trade when the whole budget is a few thousand parameters. No normalisation layer: at these
     widths a norm's parameters are a visible fraction of the budget, and the planes are already 0/1.
+
+    `dilate=False` reproduces the undilated stack the first models used. It is kept because the
+    comparison between them is the finding, not a footnote.
     """
 
-    def __init__(self, channels: int, blocks: int, planes: int = N_PLANES, moves: int = N_MOVES):
+    def __init__(self, channels: int, blocks: int, planes: int = N_PLANES, moves: int = N_MOVES,
+                 dilate: bool = True):
         super().__init__()
         widths = [(planes, channels)] + [(channels, channels)] * blocks
-        self.stage = Stage(widths)
+        dilations = doubling(len(widths)) if dilate else None
+        self.stage = Stage(widths, dilations)
         self.mix = nn.Conv2d(channels, channels, 1)
         self.head = nn.Conv2d(channels, moves, 1)
         self.channels = channels
@@ -116,8 +161,11 @@ class EncDec(nn.Module):
         assert stride in (2, 4), "a stride that does not divide 64, 96 and 128 breaks a preset"
         self.stride = stride
         stem_ch = max(8, channels // 4)
+        # The stem stays undilated: it runs at full resolution and its job is per-cell detail. Reach
+        # is the deep stack's job, and down there one cell is `stride` cells of board already.
         self.stem = Stage([(planes, stem_ch)])
-        self.deep = Stage([(stem_ch, channels)] + [(channels, channels)] * blocks)
+        deep_widths = [(stem_ch, channels)] + [(channels, channels)] * blocks
+        self.deep = Stage(deep_widths, doubling(len(deep_widths), cap=4))
         self.up = nn.Conv2d(channels, stem_ch, 1)
         self.channels = stem_ch * 2
         self.head = nn.Conv2d(self.channels, moves, 1)
@@ -172,7 +220,7 @@ def build(spec: dict) -> nn.Module:
     arch = spec["arch"]
     if arch not in ARCHS:
         raise ValueError(f"no architecture '{arch}' (have: {', '.join(sorted(ARCHS))})")
-    kwargs = {k: spec[k] for k in ("channels", "stride", "blocks") if k in spec}
+    kwargs = {k: spec[k] for k in ("channels", "stride", "blocks", "dilate") if k in spec}
     return ARCHS[arch](**kwargs)
 
 

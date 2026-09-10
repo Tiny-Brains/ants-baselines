@@ -91,6 +91,10 @@ env. Never report a result from the env as a result.
 
 ## Things that were measured here, and cost time to find
 
+- **Receptive field was the binding constraint, not capacity** — the long version is
+  [`docs/receptive-field.md`](docs/receptive-field.md), and it is the one to read first. Dilation is
+  an attribute of `Conv`, not an operator, so it needs nothing the allowlist does not have.
+
 - **fp16 initializers are free capacity.** A `Cast` back to float32 at each use, which ORT
   constant-folds at graph optimisation, so the *file* halves and the runtime does not change:
   **2.03x the parameters for the same weight class**, identical play over 396 per-ant orders, same

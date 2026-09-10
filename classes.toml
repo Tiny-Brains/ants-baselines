@@ -70,10 +70,13 @@ name = "nano"
 max_bytes = 8192
 ## 5,340 bytes of weights -> ~2,900 fp16 parameters. 0.1 GFLOP: the deadline is nowhere near.
 arch = "trunk"
-channels = 30
-blocks = 0            # stem 3x3, then 1x1 only: at this width a second 3x3 is the whole budget
-## Measured: 3,005 parameters, S = 5,902 (72% of the cap), 1.5 ms (5% of a seat share).
-target_params = 3000
+channels = 9
+blocks = 3            # four 3x3s at dilations 1, 2, 4, 8: reach 15 cells each way
+## THE FIRST NANO WAS 30 CHANNELS AND ONE 3x3 -- ten times the width and a reach of ONE CELL. It
+## plateaued at 44.6% agreement with the teacher inside one epoch and grew colonies of 5 ants where
+## the teacher grows 33. Nine channels that can see fifteen cells is the better trade, and finding
+## that out is most of what this repository is for.
+target_params = 2939
 
 [[class]]
 name = "micro"
@@ -81,10 +84,12 @@ max_bytes = 65536
 ## ~24,900 fp16 parameters, 0.8 GFLOP. The class the existing `ants-dense` fixture sits in, so
 ## everything here is directly comparable to a known artifact.
 arch = "trunk"
-channels = 48
-blocks = 1
-## Measured: 26,453 parameters, S = 48,814 (74% of the cap), 10.6 ms (34% of a seat share).
-target_params = 26500
+channels = 28
+blocks = 3            # reach 15 cells, as nano
+## The first micro was 48 channels and a 5x5 reach: 26,453 parameters, 47.2% agreement, and it LOST
+## to the 3,005-parameter nano over 18 boards while growing bigger colonies. Capacity was not what
+## it was short of.
+target_params = 24001
 
 [[class]]
 name = "mini"

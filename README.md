@@ -106,6 +106,14 @@ models/                         the finished artifacts, committed
 tests/                          the conformance gate
 ```
 
+### What cost the most to learn
+
+[`docs/receptive-field.md`](docs/receptive-field.md) is the record of the mistake this repository
+existed to catch: the first two models were designed against the byte cap, spent it on width, and
+could see one and two cells respectively while the teacher they imitated plans 32 cells deep. Nine
+times the parameters bought 2.6 points of agreement and the bigger one lost the round robin.
+Dilating the convolutions took micro from 47.2% to 91.1% with fewer parameters.
+
 ## What must stay true
 
 - **`adapter.json` is generated, never hand-edited.** It is one of two renderings of the encoding;
