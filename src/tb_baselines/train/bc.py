@@ -19,17 +19,22 @@ signal five hundred to one.
 One consequence is worth knowing before reading a loss curve: **a batch is a variable number of
 decisions**, because seats have different ant counts. The reported loss is per ant.
 
-## Class imbalance is real and is deliberately not corrected
+## What the labels look like, measured
 
-The teacher holds a lot — an ant with nowhere better to go stays put — so `-` is the plurality
-label, and the usual reflex is to reweight the classes. Don't, at least not without measuring it:
-*holding is frequently the right move*, so the imbalance is signal rather than sampling bias, and
-upweighting the four move classes trains the network toward moving when it should not. If it is
-tried, the thing to read is the win rate in `eval.py` and not the accuracy here.
+Over 1.16 million decisions the teacher's moves are **W 25.6% / E 25.3% / S 24.3% / N 23.8% / hold
+1.0%**. There is no class imbalance to correct: an ant almost always has somewhere to be, and the
+four directions are near-uniform.
 
-Accuracy against the teacher is the quantity being minimised, not the quantity that matters. A
-network can agree with the teacher 80% of the time and play far worse, because the 20% it gets
-wrong compounds over three hundred turns. Play it.
+That near-uniformity is also why the first dataset was thrown away. It came from a teacher that
+shuffled the directions before choosing, so two equidistant neighbours — the common case in open
+ground — were a coin flip, and a quarter of the labels were not a function of the state at all.
+Cross-entropy against a coin flip has a floor no capacity gets past, so the class ladder would have
+been measuring the teacher's noise rather than each class's capacity. The teacher is deterministic
+now; see `teacher.py`.
+
+Accuracy is the quantity being minimised and not the quantity that matters. A network can agree with
+the teacher four times in five and play far worse, because the fifth compounds over three hundred
+turns. Play it.
 """
 
 from __future__ import annotations

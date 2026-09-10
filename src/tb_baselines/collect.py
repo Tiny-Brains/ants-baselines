@@ -41,12 +41,10 @@ def collect(
     matches_per_wave: int = 16,
     max_turns: int = 300,
     seed: int = 1,
-    teacher_seed: int = 0,
     preset: str | None = None,
-    explore: float = 0.25,
 ) -> dict:
     """Play until `seat_turns` rows are written, and report what was collected."""
-    teacher = Teacher(explore=explore, seed=teacher_seed)
+    teacher = Teacher()
     out.parent.mkdir(parents=True, exist_ok=True)
 
     written = 0
@@ -67,8 +65,9 @@ def collect(
             "presets": [p["name"] for p in env.hello["presets"]],
             "max_turns": max_turns,
             "env_seed": seed,
-            "teacher_seed": teacher_seed,
-            "explore": explore,
+            # The teacher is a pure function of the observation, so the env seed is the whole
+            # provenance: this dataset is reproducible from that number and the engine digest.
+            "teacher": "deterministic potential field",
         }) + "\n")
 
         step = env.reset()
@@ -118,15 +117,12 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--matches-per-wave", type=int, default=16)
     ap.add_argument("--max-turns", type=int, default=300)
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--teacher-seed", type=int, default=0)
     ap.add_argument("--preset", default=None, help="pin to one preset; default is all three")
-    ap.add_argument("--explore", type=float, default=0.25)
     a = ap.parse_args(argv)
 
     stats = collect(
         a.out, a.seat_turns, waves=a.waves, matches_per_wave=a.matches_per_wave,
-        max_turns=a.max_turns, seed=a.seed, teacher_seed=a.teacher_seed,
-        preset=a.preset, explore=a.explore,
+        max_turns=a.max_turns, seed=a.seed, preset=a.preset,
     )
     (a.out.with_suffix("").with_suffix(".stats.json")).write_text(json.dumps(stats, indent=2) + "\n")
     print(json.dumps(stats, indent=2))

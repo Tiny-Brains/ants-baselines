@@ -25,13 +25,30 @@ Three refinements, each of which changes the games it produces rather than its s
   distance field would break the BFS's monotonicity and is the usual bug here.
 * **No two ants take one square.** They would both die (`ants/src/turn.rs`: every ant finishing on a
   shared square dies, your own included), which is the single cheapest way to lose a colony.
-* **A share of ants scout.** With `explore` at 0, a colony that has eaten everything it can see sits
-  still and the match ends `idle_food` — which is exactly what the untrained fixtures do.
+* **Nothing is random.** Given a seed and an engine the teacher is a pure function of the
+  observation, and that is not tidiness — it is what makes it imitable at all. See below.
+
+## Determinism is a requirement, not a nicety
+
+The first version shuffled the four directions before choosing, to break ties without a directional
+bias, and sent a quarter of its ants scouting at random. Both looked harmless and neither was:
+measured over 1.16 million decisions the labels came out **W 25.6% / E 25.3% / S 24.3% / N 23.8% /
+hold 1.0%** — almost exactly uniform, because in open ground two of the four neighbours are usually
+equidistant from a far target and the choice between them was a coin flip.
+
+A label that is not a function of the state cannot be learned from. Imitation accuracy has a ceiling
+somewhere near the fraction of decisions that were not coin flips, and no amount of capacity gets
+past it — so a class ladder built on that dataset would be measuring the teacher's noise floor
+rather than the class's capacity.
+
+So ties break in a fixed direction order, and the random scouting is gone: the frontier is already
+seeded into the flood, so an ant with nowhere better to go walks toward what it has not seen
+*because the field says so*. The directional bias in a genuine tie is real and is the right trade —
+it is deterministic, so a network can learn it exactly.
 """
 
 from __future__ import annotations
 
-import random
 from collections import deque
 
 import numpy as np
@@ -48,16 +65,13 @@ FAR = np.int32(1 << 29)
 class Teacher:
     """One instance per process; it holds no state between turns and is safe to reuse."""
 
-    def __init__(self, hill_lead: int = 6, explore: float = 0.25, max_depth: int = 32,
-                 seed: int = 0):
+    def __init__(self, hill_lead: int = 6, max_depth: int = 32):
         self.hill_lead = hill_lead
-        self.explore = explore
         # An ant decides one step, so a target sixty cells away and a target thirty cells away lead
         # to the same move. Capping the flood is therefore free in play quality and is most of the
         # run time: uncapped, the frontier seeding makes almost every cell of the board get visited
         # every seat-turn, in pure Python.
         self.max_depth = max_depth
-        self.rng = random.Random(seed)
 
     # ---- the field ------------------------------------------------------------------
 
@@ -151,22 +165,23 @@ class Teacher:
         taken = {tuple(a) for a in mine}
         out = np.full(len(mine), HOLD, dtype=np.int64)
 
-        # Nearest-first, so the ant with the best claim on a square gets it.
-        order = sorted(range(len(mine)), key=lambda i: dist[mine[i][0], mine[i][1]])
+        # Nearest-first, so the ant with the best claim on a square gets it. Ties in the sort break
+        # on the index, which is `mine`'s order, which the engine fixes row-major -- so this is
+        # deterministic too.
+        order = sorted(range(len(mine)), key=lambda i: (dist[mine[i][0], mine[i][1]], i))
         for i in order:
             ar, ac = mine[i]
             best, best_d = HOLD, dist[ar, ac]
-            scout = self.rng.random() < self.explore
-            options = list(range(4))
-            self.rng.shuffle(options)                    # break ties without a directional bias
-            for k in options:
+            # Fixed order, and strictly better only. Two equidistant neighbours are common in open
+            # ground and choosing between them at random is what made a quarter of these labels
+            # unlearnable.
+            for k in range(4):
                 dr, dc = DELTAS[k]
                 nr, nc = (ar + dr) % rows, (ac + dc) % cols
                 if water[nr, nc] or blocked[nr, nc] or (nr, nc) in taken:
                     continue
-                d = dist[nr, nc]
-                if d < best_d or (scout and best == HOLD and d < FAR):
-                    best, best_d = k, d
+                if dist[nr, nc] < best_d:
+                    best, best_d = k, dist[nr, nc]
             if best != HOLD:
                 dr, dc = DELTAS[best]
                 nr, nc = (ar + dr) % rows, (ac + dc) % cols
