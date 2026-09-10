@@ -83,15 +83,31 @@ def cli() -> str:
 
 
 def boards(preset: str | None, limit: int) -> list[tuple[str, str]]:
-    """`(preset, map_id)` for the boards to play, from the cartridge's own catalogue."""
+    """`(preset, map_id)` for the boards to play, from the cartridge's own catalogue.
+
+    Read off `tinybrains maps` rather than hard-coded, because the board list belongs to the
+    cartridge and a game shipping different boards should just work. That means parsing a
+    human-readable table, so the parse is CHECKED: an empty result would otherwise play no matches
+    and print a round robin of all zeroes, which reads like a field of draws rather than like a bug.
+    """
     out = subprocess.run([cli(), "maps"], cwd=ROOT, capture_output=True, text=True)
+    if out.returncode != 0:
+        raise SystemExit(f"tinybrains maps failed:\n{out.stderr or out.stdout}")
     rows = []
-    for line in out.stdout.splitlines()[1:]:
+    for line in out.stdout.splitlines()[1:]:      # line 0 is the "<game> N boards" header
         parts = line.split()
-        if len(parts) >= 2:
+        # id, preset, then a dimensions field -- enough shape to notice if the table changes.
+        if len(parts) >= 3 and "x" in parts[2]:
             rows.append((parts[1], parts[0]))
+    if not rows:
+        raise SystemExit(
+            "could not read a board out of `tinybrains maps`; its output format has changed:\n"
+            + "\n".join(out.stdout.splitlines()[:4])
+        )
     if preset:
         rows = [r for r in rows if r[0] == preset]
+        if not rows:
+            raise SystemExit(f"no boards for preset '{preset}'")
     picked: dict[str, list[str]] = {}
     for p, m in rows:
         picked.setdefault(p, []).append(m)
