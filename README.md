@@ -141,6 +141,18 @@ Dilating the convolutions took micro from 47.2% to 91.1% with fewer parameters.
 
 ## Status
 
+**11 September 2026 — PPO runs 2.3x faster, same algorithm.** An iteration (micro, 48 turns, 4 waves
+of 8) went from 23 / 34 / 39 s to 13 / 13 / 14 s. The time was not arithmetic: MPS compiles a graph
+per tensor shape and the per-ant tensors had a new length on nearly every call, and a blocking copy
+to MPS waited out all queued work eight times a minibatch. Per-ant tensors are padded to a multiple
+of 256 and masked, a board size's samples go to the device once an update, and moves are drawn on
+the host from `log_softmax` instead of `Categorical`. On a fixed batch fp32 agrees with the old loop
+to seven significant digits; moves now come from `np.random.default_rng(--seed)`, so a run
+reproduces itself but not an older one. `--amp` (fp16 autocast) is another 8% and off by default.
+About 10 of the 13 seconds are now the convolutions themselves. The env is no longer a term: on
+`tinybrains env`'s parallel waves and the faster engine the same run is 13 / 13 / 13 s, with losses
+equal to the digit.
+
 **10 September 2026 — the pipeline is built, three artifacts ship, and the class ladder measures
 something.**
 

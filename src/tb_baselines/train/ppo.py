@@ -40,11 +40,31 @@ A `[7, 128, 128]` int8 board is 114 KiB, so a rollout of 64 steps across 100 liv
 730 MB of tensors. The observations behind them are about 2 KB each. They are re-encoded during the
 update, which costs about a second per epoch and makes the rollout length a free parameter instead
 of a memory budget.
+
+## Throughput is shapes and waits, not arithmetic
+
+On the M2 Pro this is developed on, micro's forward+backward is 2.7 ms a 128x128 board on MPS (fp32;
+the CPU is ten times slower), which made an iteration's update about ten seconds of arithmetic — and
+it took twenty-four. The difference was two things, and neither shows in a profile as itself: both
+surface as time in whichever op next touches the device.
+
+- **MPS compiles a graph per tensor shape.** The per-ant tensors had a new length on nearly every
+  call, because the ant count of a minibatch almost never repeats: 153 ms a minibatch at a fresh
+  length against 60 ms at one it had seen. They are padded to `_bucket` now, with zero weight.
+- **A blocking copy to MPS waits for everything already queued.** Every minibatch moved eight
+  arrays and read four statistics back with `float()`, so each one waited out the previous one's
+  backward pass. `_Group` moves a board size's data once an update and the loop only slices it.
+
+With both gone the update is the arithmetic, about ten seconds, and a 48-turn iteration went from
+23 / 34 / 39 s (it grew as colonies grew, and with them the number of unseen lengths) to 13 / 13 /
+14 s. What is left is the convolutions. `--amp` (fp16 autocast) measured another 8% and is off by
+default: its gradient is about 1% from fp32's, which is not nothing for a small speed-up.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import time
 from collections import defaultdict
@@ -60,6 +80,27 @@ from ..env import Env, orders_from_indices
 from ..export import budget, classes
 from ..planes import N_MOVES
 from .bc import device
+
+ANT_BUCKET = 256
+
+
+def _bucket(n: int, q: int = ANT_BUCKET) -> int:
+    """`n` rounded up to a multiple of `q`, and never zero.
+
+    MPS caches a compiled graph per tensor shape, so a per-ant tensor whose length never repeats is
+    a compile on every call. Measured on one minibatch of 32 boards at 96x96: 59.6 ms at a length
+    already seen, 153.5 ms at a fresh one, 57.6 ms padded to a multiple of 256 (128 was not enough:
+    69.4). Padded rows are masked out of every sum, so the arithmetic is the same.
+    """
+    return max(q, -(-n // q) * q)
+
+
+def _autocast(dev: torch.device, enabled: bool):
+    """fp16 activations for the trunk, and nothing else: every caller casts the logits and the value
+    back to fp32 before a softmax, a ratio or a loss touches them."""
+    if not enabled:
+        return contextlib.nullcontext()
+    return torch.autocast(dev.type, dtype=torch.float16)
 
 
 @dataclass
@@ -119,11 +160,16 @@ def gae(rewards: list[float], values: list[float], bootstrap: float, r: Reward):
 class Runner:
     """The rollout loop: env in, trajectories out."""
 
-    def __init__(self, model: nets.ActorCritic, env: Env, dev: torch.device, reward: Reward):
+    def __init__(self, model: nets.ActorCritic, env: Env, dev: torch.device, reward: Reward,
+                 seed: int = 0, amp: bool = False):
         self.model = model
         self.env = env
         self.dev = dev
         self.reward = reward
+        self.amp = amp
+        # Moves are drawn on the host, from its own stream, so `update`'s minibatch permutations
+        # stay on the global numpy stream they have always used.
+        self.rng = np.random.default_rng(seed)
         self.step = env.reset()
         self.open: dict[tuple[int, int], Trajectory] = {}
         self.done: list[Trajectory] = []
@@ -131,15 +177,26 @@ class Runner:
 
     @torch.no_grad()
     def act(self, boards: np.ndarray, rows: "_AntIndex"):
-        """Sample a move for every ant on every board in one group."""
+        """Sample a move for every ant on every board in one group.
+
+        The policy at an ant's cell is `softmax(logits)` there — the factorised policy `update`
+        differentiates — and the draw is by inverse CDF on the host, an exact sample from it.
+        `torch.distributions.Categorical` on MPS cost a `multinomial` that waited on the forward
+        pass and then two more transfers back; this is one.
+        """
         t = torch.from_numpy(boards).to(self.dev)
-        logits, values = self.model(t)
-        per_ant = logits[rows.board, :, rows.r, rows.c]
-        # validate_args=False: the checks cost 8% of the whole loop proving that a tensor of
-        # logits is a tensor of logits, on every construction, on every minibatch.
-        dist = torch.distributions.Categorical(logits=per_ant, validate_args=False)
-        picks = dist.sample()
-        return picks.cpu().numpy(), dist.log_prob(picks).cpu().numpy(), values.cpu().numpy()
+        with _autocast(self.dev, self.amp):
+            logits, values = self.model(t)
+        per_ant = logits[rows.board, :, rows.r, rows.c].float()      # [_bucket(n), moves]
+        logp_all = torch.log_softmax(per_ant, dim=-1)
+        host = torch.cat([logp_all.reshape(-1), values.float()]).cpu().numpy()
+        cut = logp_all.numel()
+        logp = host[:cut].reshape(-1, N_MOVES)[: rows.n]
+        cdf = np.cumsum(np.exp(logp.astype(np.float64)), axis=1)
+        u = self.rng.random(rows.n) * cdf[:, -1]
+        # the first move whose cumulative probability exceeds u; never one of probability zero
+        picks = np.minimum((cdf <= u[:, None]).sum(axis=1), N_MOVES - 1)
+        return picks, logp[np.arange(rows.n), picks], host[cut:]
 
     def collect(self, steps: int) -> dict:
         """`steps` env turns. Returns statistics; the trajectories accumulate on `self`."""
@@ -148,18 +205,15 @@ class Runner:
             actions: list[str | None] = [None] * len(self.step.seats)
 
             for group in self.step.groups:
-                idx = np.array(group.indices)
-                counts = [len(self.step.seats[i].obs["mine"]) for i in idx]
                 rows = _AntIndex(self.step.seats, group.indices).to(self.dev)
                 picks, logp, values = self.act(group.boards, rows)
+                orders = orders_from_indices(picks, rows.counts)
 
                 at = 0
-                for k, i in enumerate(idx):
-                    n = counts[k]
-                    seat = self.step.seats[i]
-                    mine = picks[at : at + n]
-                    actions[i] = orders_from_indices(mine, [n])[0]
-                    self._record(seat, group.boards[k : k + 1], mine,
+                for k, i in enumerate(group.indices):
+                    n = rows.counts[k]
+                    actions[i] = orders[k]
+                    self._record(self.step.seats[i], group.boards[k : k + 1], picks[at : at + n],
                                  logp[at : at + n], float(values[k]))
                     at += n
 
@@ -247,31 +301,116 @@ class Runner:
 
 class _AntIndex:
     """Flat `(board, row, col)` for every ant in a group, which is the projection the policy head
-    and the adapter's `out` program both do."""
+    and the adapter's `out` program both do.
+
+    Padded to `_bucket(n)` rows so the gather has a shape MPS has seen before; the padding reads
+    board 0's cell (0, 0), and `act` drops it after the transfer back."""
 
     def __init__(self, seats, indices):
-        b, r, c = [], [], []
-        for k, i in enumerate(indices):
-            for row, col in seats[i].obs["mine"]:
-                b.append(k)
-                r.append(row)
-                c.append(col)
-        self.board = torch.tensor(b, dtype=torch.long)
-        self.r = torch.tensor(r, dtype=torch.long)
-        self.c = torch.tensor(c, dtype=torch.long)
+        mine = [np.asarray(seats[i].obs["mine"], dtype=np.int64).reshape(-1, 2) for i in indices]
+        self.counts = [len(m) for m in mine]
+        self.n = sum(self.counts)
+        idx = np.zeros((3, _bucket(self.n)), dtype=np.int64)
+        if self.n:
+            idx[0, : self.n] = np.repeat(np.arange(len(mine)), self.counts)
+            idx[1:, : self.n] = np.concatenate(mine).T
+        self._idx = torch.from_numpy(idx)
+        self.board, self.r, self.c = self._idx
 
     def to(self, dev):
-        self.board, self.r, self.c = self.board.to(dev), self.r.to(dev), self.c.to(dev)
+        self._idx = self._idx.to(dev)
+        self.board, self.r, self.c = self._idx
         return self
 
 
+@dataclass
+class _Minibatch:
+    boards: torch.Tensor        # [B, planes, rows, cols] int8
+    board: torch.Tensor         # [M] which of those boards the ant is on
+    r: torch.Tensor             # [M]
+    c: torch.Tensor             # [M]
+    act: torch.Tensor           # [M] the move it was given
+    ret: torch.Tensor           # [B]
+    old_lp: torch.Tensor        # [M]
+    adv: torch.Tensor           # [M] its seat's advantage, repeated
+    mask: torch.Tensor          # [M] 1 for an ant, 0 for the padding up to `_bucket`
+    n: int                      # ants, not counting padding
+
+
+class _Group:
+    """One board size's samples, moved to the device once an update.
+
+    The boards and every per-ant array go over once; each epoch's minibatch plan goes over as two
+    arrays; and the loop itself only slices tensors that are already there, so nothing inside it
+    waits on the host.
+    """
+
+    def __init__(self, samples, advs: np.ndarray, members: list[int], dev):
+        self.n = len(members)
+        mine = [np.asarray(samples[i][0]["mine"], dtype=np.int64).reshape(-1, 2) for i in members]
+        self.counts = np.array([len(m) for m in mine], dtype=np.int64)
+        self.starts = np.cumsum(self.counts) - self.counts
+        rc = np.concatenate(mine)
+        self.r, self.c = rc[:, 0], rc[:, 1]
+        self.act = np.concatenate([samples[i][2] for i in members]).astype(np.int64)
+        self.old_lp = np.concatenate([samples[i][3] for i in members]).astype(np.float32)
+        self.adv = np.repeat(advs[members], self.counts)
+        self.ret = np.array([samples[i][5] for i in members], dtype=np.float32)
+        self.boards = torch.from_numpy(
+            np.concatenate([samples[i][1] for i in members], 0)).to(dev)
+
+    def minibatches(self, order: np.ndarray, size: int, dev):
+        """This epoch's minibatches, `size` samples at a time in `order`."""
+        ints, flts, cuts = [], [], []
+        for start in range(0, len(order), size):
+            sel = order[start : start + size]
+            cnt = self.counts[sel]
+            n = int(cnt.sum())
+            m = _bucket(n)
+            ant = np.arange(n) + np.repeat(self.starts[sel] - (np.cumsum(cnt) - cnt), cnt)
+            ib = np.zeros(len(sel) + 4 * m, dtype=np.int64)
+            ib[: len(sel)] = sel
+            per = ib[len(sel):].reshape(4, m)
+            per[0, :n] = np.repeat(np.arange(len(sel)), cnt)
+            per[1, :n] = self.r[ant]
+            per[2, :n] = self.c[ant]
+            per[3, :n] = self.act[ant]
+            fb = np.zeros(len(sel) + 3 * m, dtype=np.float32)
+            fb[: len(sel)] = self.ret[sel]
+            fper = fb[len(sel):].reshape(3, m)
+            fper[0, :n] = self.old_lp[ant]
+            fper[1, :n] = self.adv[ant]
+            fper[2, :n] = 1.0
+            ints.append(ib)
+            flts.append(fb)
+            cuts.append((len(sel), m, n))
+
+        ints_t = torch.from_numpy(np.concatenate(ints)).to(dev)
+        flts_t = torch.from_numpy(np.concatenate(flts)).to(dev)
+        io = fo = 0
+        for b, m, n in cuts:
+            iv = ints_t[io : io + b + 4 * m]
+            fv = flts_t[fo : fo + b + 3 * m]
+            io += b + 4 * m
+            fo += b + 3 * m
+            board, r, c, act = iv[b:].view(4, m)
+            old_lp, adv, mask = fv[b:].view(3, m)
+            yield _Minibatch(self.boards.index_select(0, iv[:b]), board, r, c, act,
+                             fv[:b], old_lp, adv, mask, n)
+
+
 def update(model, opt, batch: list[Trajectory], r: Reward, dev, epochs: int,
-           clip: float, entropy: float, minibatch: int) -> dict:
+           clip: float, entropy: float, minibatch: int, amp: bool = False,
+           scaler: "torch.amp.GradScaler | None" = None) -> dict:
     """PPO, with the ratio formed per ant.
 
     A per-seat ratio would be `exp(sum over 90 ants of the log-probability difference)`, which
     leaves any sane clip range on the first update. Per ant is both correct for a factorised policy
     and numerically the only version that does anything.
+
+    The per-ant log-probability and entropy are `log_softmax` and `-sum(p log p)` written out, which
+    is what `torch.distributions.Categorical` computes; the means are masked sums over the real ants
+    divided by their count. The statistics stay on the device until the last minibatch.
     """
     samples = []
     for traj in batch:
@@ -290,62 +429,49 @@ def update(model, opt, batch: list[Trajectory], r: Reward, dev, epochs: int,
     by_size: dict[tuple[int, int], list[int]] = defaultdict(list)
     for i, sample in enumerate(samples):
         by_size[tuple(sample[0]["size"])].append(i)
+    groups = [_Group(samples, advs, members, dev) for members in by_size.values()]
 
-    stats = defaultdict(float)
-    batches = 0
+    rows = []
     for _ in range(epochs):
-        for group in by_size.values():
-            order = np.random.permutation(len(group))
-            for start in range(0, len(order), minibatch):
-                chunk = [group[j] for j in order[start : start + minibatch]]
-                bt = torch.from_numpy(np.concatenate([samples[i][1] for i in chunk], 0)).to(dev)
+        for group in groups:
+            for mb in group.minibatches(np.random.permutation(group.n), minibatch, dev):
+                with _autocast(dev, amp):
+                    logits, values = model(mb.boards)
+                per_ant = logits[mb.board, :, mb.r, mb.c].float()
+                logp = torch.log_softmax(per_ant, dim=-1)
+                new_lp = logp.gather(1, mb.act.unsqueeze(1)).squeeze(1)
 
-                b_idx, rr, cc, acts, olp, adv_rep = [], [], [], [], [], []
-                rets = []
-                for k, i in enumerate(chunk):
-                    obs, _, a, lp, _, ret = samples[i]
-                    mine = np.asarray(obs["mine"], dtype=np.int64).reshape(-1, 2)
-                    b_idx.append(np.full(len(mine), k, dtype=np.int64))
-                    rr.append(mine[:, 0])
-                    cc.append(mine[:, 1])
-                    acts.append(a)
-                    olp.append(lp)
-                    adv_rep.append(np.full(len(a), advs[i], dtype=np.float32))
-                    rets.append(ret)
-
-                nd = lambda parts, dt: torch.from_numpy(
-                    np.concatenate(parts).astype(dt, copy=False)).to(dev)
-                logits, values = model(bt)
-                per_ant = logits[nd(b_idx, np.int64), :, nd(rr, np.int64), nd(cc, np.int64)]
-                dist = torch.distributions.Categorical(logits=per_ant, validate_args=False)
-                a_t = nd(acts, np.int64)
-                new_lp = dist.log_prob(a_t)
-                old_lp = nd(olp, np.float32)
-                adv_t = nd(adv_rep, np.float32)
-
-                ratio = torch.exp(new_lp - old_lp)
-                policy_loss = -torch.min(
-                    ratio * adv_t, torch.clamp(ratio, 1 - clip, 1 + clip) * adv_t
-                ).mean()
-                value_loss = F.mse_loss(
-                    values, torch.from_numpy(np.asarray(rets, dtype=np.float32)).to(dev)
-                )
-                ent = dist.entropy().mean()
+                ratio = torch.exp(new_lp - mb.old_lp)
+                policy_loss = -(torch.min(
+                    ratio * mb.adv, torch.clamp(ratio, 1 - clip, 1 + clip) * mb.adv
+                ) * mb.mask).sum() / mb.n
+                value_loss = F.mse_loss(values.float(), mb.ret)
+                # Clamped as Categorical clamps it, so a -inf log-probability times a zero
+                # probability is 0 rather than NaN.
+                p_log_p = logp.exp() * logp.clamp(min=torch.finfo(logp.dtype).min)
+                ent = (-p_log_p.sum(-1) * mb.mask).sum() / mb.n
                 loss = policy_loss + 0.5 * value_loss - entropy * ent
 
                 opt.zero_grad(set_to_none=True)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-                opt.step()
+                if scaler is None:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                    opt.step()
+                else:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(opt)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                    scaler.step(opt)
+                    scaler.update()
 
-                batches += 1
-                stats["policy"] += float(policy_loss.detach())
-                stats["value"] += float(value_loss.detach())
-                stats["entropy"] += float(ent.detach())
-                stats["clipped"] += float(
-                    ((ratio - 1).abs() > clip).float().mean().detach()
-                )
-    return {k: v / max(batches, 1) for k, v in stats.items()} | {"samples": len(samples)}
+                clipped = (((ratio - 1).abs() > clip).float() * mb.mask).sum() / mb.n
+                rows.append(torch.stack([policy_loss, value_loss, ent, clipped]).detach())
+    if not rows:
+        return {"samples": len(samples)}
+
+    means = torch.stack(rows).cpu().numpy().astype(np.float64).mean(axis=0)
+    return dict(zip(("policy", "value", "entropy", "clipped"), map(float, means))) | {
+        "samples": len(samples)}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -362,6 +488,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--clip", type=float, default=0.2)
     ap.add_argument("--entropy", type=float, default=0.01)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--amp", action="store_true",
+                    help="fp16 autocast for the trunk's forward and backward, with a GradScaler; "
+                         "softmax, ratio, losses and the optimizer stay fp32")
     ap.add_argument("--init", type=Path, default=None, help="a bc checkpoint to start from")
     ap.add_argument("--out", type=Path, default=None)
     a = ap.parse_args(argv)
@@ -380,42 +509,47 @@ def main(argv: list[str] | None = None) -> None:
     b = budget(a.cls)
     method = "bc-ppo" if a.init else "ppo"
     print(f"{a.cls} {method}: {nets.policy_params(model):,} policy parameters "
-          f"(budget about {b['params_at_target']:,}), {dev.type}")
+          f"(budget about {b['params_at_target']:,}), {dev.type}{' fp16 autocast' if a.amp else ''}")
 
     out = a.out or Path("runs") / f"{a.cls}-{method}"
     out.mkdir(parents=True, exist_ok=True)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr)
+    scaler = torch.amp.GradScaler(dev.type) if a.amp else None
     reward = Reward()
 
     history = []
     best = -1e9
     with Env(waves=a.waves, matches_per_wave=a.matches_per_wave,
              max_turns=a.max_turns, seed=1000 + a.seed) as env:
-        runner = Runner(model, env, dev, reward)
+        runner = Runner(model, env, dev, reward, seed=a.seed, amp=a.amp)
         print(f"engine {env.engine_digest[:20]}")
         for it in range(1, a.iters + 1):
             t0 = time.time()
             rolled = runner.collect(a.rollout)
             batch = runner.harvest()
+            t1 = time.time()
             stats = update(model, opt, batch, reward, dev, a.epochs, a.clip,
-                           a.entropy, a.minibatch)
+                           a.entropy, a.minibatch, amp=a.amp, scaler=scaler)
             took = time.time() - t0
-            row = {"iter": it, **rolled, **stats, "seconds": round(took, 1)}
+            row = {"iter": it, **rolled, **stats, "seconds": round(took, 1),
+                   "collect_seconds": round(t1 - t0, 1)}
             history.append(row)
             print(f"  {it:4d}  return {rolled['mean_return']:+7.2f} over {rolled['episodes']:3d} eps"
                   f"   pi {stats.get('policy', 0):+.4f}  V {stats.get('value', 0):.3f}"
-                  f"  H {stats.get('entropy', 0):.3f}  {stats['samples']:5d} samples  {took:.0f}s")
+                  f"  H {stats.get('entropy', 0):.3f}  {stats['samples']:5d} samples  {took:.0f}s"
+                  f" (collect {t1 - t0:.0f}s)")
             if rolled["episodes"] and rolled["mean_return"] > best:
                 best = rolled["mean_return"]
                 torch.save({"trunk": trunk.state_dict(), "class": a.cls,
                             "engine_digest": env.engine_digest}, out / "best.pt")
             if it % 10 == 0:
                 (out / "history.json").write_text(json.dumps(
-                    {"class": a.cls, "method": method, "reward": vars(reward),
+                    {"class": a.cls, "method": method, "reward": vars(reward), "amp": a.amp,
                      "iters": history}, indent=2) + "\n")
 
     (out / "history.json").write_text(json.dumps(
-        {"class": a.cls, "method": method, "reward": vars(reward), "iters": history}, indent=2) + "\n")
+        {"class": a.cls, "method": method, "reward": vars(reward), "amp": a.amp,
+         "iters": history}, indent=2) + "\n")
     print(f"  -> {out / 'best.pt'}")
     print("  a rising return is not strength. Play it: `python -m tb_baselines.eval`")
 
