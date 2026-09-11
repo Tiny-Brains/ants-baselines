@@ -89,10 +89,16 @@ seeding script needs each artifact's `metrics.json` for the values admission wou
 measured.
 
 Since the entry split, each baseline is a **model** of its own — named for its directory here — and
-all three share this one repository. That is legal because an entry is unique per
-`(owner, repository)` rather than globally: the cross-competitor half of that rule comes from the
-ownership check, not from an index. Season 1's rules allow `Tiny-Brains` as an organisation, so the
-baselines are admitted by exactly the rule a competitor is admitted by rather than by an exception.
+all three share this one repository. That is legal because they are seeded by `INSERT` and carry no
+`owner_github_id`, and the global `models_repo_uniq` index is partial on that column. They are the
+exception, and the schema says so in one place rather than arguing it.
+
+Season 1 used to name `Tiny-Brains` under `repo.allow_orgs` so that they were describable by the
+same rule a competitor is admitted by. They never needed it — they do not go through
+`POST /v1/games/{game}/models`, which is the only thing that checks — and it was an allowance to
+everyone: any signed-in competitor could create an entry on this repository and submit these
+releases as their own model. The line is gone, and an organisation allowance now only applies to
+accounts the season also lists as participants.
 
 ## Layout
 
