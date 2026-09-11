@@ -88,6 +88,12 @@ At seed time, `devops/compose/db-init/30-seed.sql` names this repository and a r
 seeding script needs each artifact's `metrics.json` for the values admission would otherwise have
 measured.
 
+Since the entry split, each baseline is a **model** of its own — named for its directory here — and
+all three share this one repository. That is legal because an entry is unique per
+`(owner, repository)` rather than globally: the cross-competitor half of that rule comes from the
+ownership check, not from an index. Season 1's rules allow `Tiny-Brains` as an organisation, so the
+baselines are admitted by exactly the rule a competitor is admitted by rather than by an exception.
+
 ## Layout
 
 ```text
