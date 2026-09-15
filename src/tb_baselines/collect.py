@@ -61,7 +61,10 @@ def collect(
         f.write(json.dumps({
             "kind": "teacher-rollout",
             "engine_digest": env.engine_digest,
-            "evaluator_digest": env.evaluator_digest,
+            # `evaluator_digest` named an axon build. The evaluator is datalogic now and the env
+            # names it by version (R10), which is what a version skew between a local pass and a
+            # remote refusal would show up in.
+            "evaluator": env.evaluator,
             "presets": [p["name"] for p in env.hello["presets"]],
             "max_turns": max_turns,
             "env_seed": seed,
