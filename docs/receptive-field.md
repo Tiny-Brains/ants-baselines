@@ -3,6 +3,13 @@
 The first two models trained here were bad, and the reason was not the thing the weight classes are
 about. This is the record of finding that out, kept because the numbers are the argument.
 
+> **The byte figures below are the old `S`** — `zstd-19(initializers) + zstd-19(adapter)`, against
+> caps half the size of today's. The metric changed on 14 September 2026 to
+> `S' = artifact_bytes + len(manifest)` and every cap doubled with it (decision R4), so a "% of cap"
+> here is comparable *within this page* and not against a current `metrics.json`. The parameter
+> counts moved too, by about 0.3%, because the count now includes values carried outside the
+> initializer list. None of it changes the finding, which is about reach.
+
 ## What was built first
 
 `Trunk(channels, blocks)` as originally written: one 3x3 stem, `blocks` further 3x3s, then 1x1

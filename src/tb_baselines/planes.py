@@ -1,22 +1,27 @@
 """The observation encoding: one spec, rendered twice.
 
 **This module exists to make train/serve skew impossible to have quietly.** A competitor who trains
-in Python encodes each observation twice — once in `adapter.json`, which is what the ladder runs,
+in Python encodes each observation twice — once in `manifest.json`, which is what the ladder runs,
 and once in numpy, which is what the optimiser sees. Two implementations of one encoding is the
 classic way to ship a model that scores worse in the arena than it did in training, and the failure
 is silent: both halves work, they just disagree.
 
 So the planes are declared once, here, and each declaration carries **both** renderings side by
-side: the JSONLogic fragment that goes into `adapter.json`, and the numpy function the trainer
+side: the JSONLogic fragment that goes into `manifest.json`, and the numpy function the trainer
 calls. `tests/test_adapter_conformance.py` then runs the real evaluator — `tinybrains adapt`, which
-is Axon's own dialect interpreter — over the cartridge's reference observations and asserts the two
-agree element for element. Proximity makes them easy to keep in step; the test is what proves it.
+is datalogic, the evaluator an Orion node runs the adapter on — over the cartridge's reference
+observations and asserts the two agree element for element. Proximity makes them easy to keep in
+step; the test is what proves it.
 
 ## The planes
 
 Six of these are the reference adapter's, unchanged, because they are proven and cheap. The seventh
-is the visibility mask `axon/docs/dialect.md` §4 added `tb.dilate` for: without it a model cannot
-tell *known empty* from *never seen*, since `water` reports 0 for both.
+is the visibility mask — and since 14 September 2026 **the engine sends it**. It used to be derived
+from `mine` with a `tb.dilate` operator that existed for exactly this plane; the expression language
+a node evaluates an adapter on cannot address an enclosing iterator's element, so the per-ant disk
+was a 241-fold unrolled kernel or nothing. The radius is a rule of the game, so the cartridge now
+computes it once and `vis` arrives beside `water` (`ants/docs/protocol.md` §1, decision R5). This
+plane is an `rle_expand` like any other.
 
 Owners are relative to the observer — you are always 0 — which is what makes `hills` splittable at
 all. That was fixed in engine `sha256:f17b51b6c92b`; under an older engine these two planes are
@@ -33,7 +38,9 @@ import numpy as np
 # The observation's own vocabulary, so a rename is one edit rather than a search.
 VIEW_RADIUS2 = 77
 
-DTYPE = "int8"
+# The datavalue dtype spelling, which is what a manifest declares and what the tensor operators
+# take. The old dialect spelled it `int8`.
+DTYPE = "i8"
 NP_DTYPE = np.int8
 
 
@@ -41,7 +48,7 @@ NP_DTYPE = np.int8
 class Plane:
     """One channel of the board tensor.
 
-    `logic` is the JSONLogic that computes it inside `adapter.json`, as a function of the size
+    `logic` is the JSONLogic that computes it inside `manifest.json`, as a function of the size
     expression (the adapter cannot hard-code a board size: three presets mean three sizes).
     `numpy` computes the same plane from the same observation, for the trainer.
     """
@@ -84,7 +91,8 @@ class Board:
 
     def scatter(self, points) -> np.ndarray:
         """Points onto a plane. Out of bounds is dropped rather than refused, which is what
-        `tb.scatter` does — see the eleven semantic choices in `axon/src/dialect/digest.rs`."""
+        datalogic's `scatter` does: "the usual producer is a detector emitting boxes in source
+        coordinates that may fall outside the target grid"."""
         g = self.zeros()
         if len(points) == 0:
             return g
@@ -95,7 +103,7 @@ class Board:
         return g
 
     def rle(self, runs) -> np.ndarray:
-        """`[v0, n0, v1, n1, …]`, row-major, as `tb.rle_expand` reads it."""
+        """`[v0, n0, v1, n1, …]`, row-major, as `rle_expand` reads it."""
         flat = np.zeros(self.rows * self.cols, dtype=NP_DTYPE)
         at = 0
         for i in range(0, len(runs) - 1, 2):
@@ -106,7 +114,11 @@ class Board:
         return flat.reshape(self.rows, self.cols)
 
     def dilate(self, g: np.ndarray, radius2: int) -> np.ndarray:
-        """Every cell within euclidean radius² of a non-zero one, wrapping — `tb.dilate`.
+        """Every cell within euclidean radius² of a non-zero one, wrapping.
+
+        **No longer part of the encoding**: `vis` arrives in the observation. It is kept because it
+        is the independent second opinion — `tests/test_adapter_conformance.py` asserts the
+        engine's mask equals this, which is what makes trusting the sent one safe.
 
         **Scattered from the non-zero cells, not rolled over the plane.** The obvious reading of the
         operator is "shift the whole board by every offset in the disk and OR them together", and
@@ -139,19 +151,19 @@ SIZE = var("size")
 
 
 def _scatter(points) -> Callable[[Any], Any]:
-    return lambda size: {"tb.scatter": [points, size, DTYPE]}
+    return lambda size: {"scatter": [points, size, DTYPE]}
 
 
 def _rc_only(source) -> dict:
-    """`[r, c, owner]` triples down to `[r, c]` pairs: `tb.scatter` takes either, but a third
-    element is a *value* to write, and an owner id written as a value is not a mask."""
+    """`[r, c, owner]` triples down to `[r, c]` pairs: `scatter` takes either, but a third element
+    is a *value* to write, and an owner id written as a value is not a mask."""
     return {"map": [source, [var("0"), var("1")]]}
 
 
 def _hills(mine: bool) -> Callable[[Any], Any]:
     test = {"==": [var("2"), 0]} if mine else {"!=": [var("2"), 0]}
     return lambda size: {
-        "tb.scatter": [_rc_only({"filter": [var("hills"), test]}), size, DTYPE]
+        "scatter": [_rc_only({"filter": [var("hills"), test]}), size, DTYPE]
     }
 
 
@@ -165,7 +177,7 @@ PLANES: tuple[Plane, ...] = (
     Plane(
         "foes",
         "enemy ants you can see this turn -- never remembered, so this plane blinks",
-        lambda size: {"tb.scatter": [_rc_only(var("foes")), size, DTYPE]},
+        lambda size: {"scatter": [_rc_only(var("foes")), size, DTYPE]},
         lambda o, b: b.scatter([f[:2] for f in o["foes"]]),
     ),
     Plane(
@@ -177,7 +189,7 @@ PLANES: tuple[Plane, ...] = (
     Plane(
         "water",
         "known water: the one field with memory, and so the only map you accumulate",
-        lambda size: {"tb.rle_expand": [var("water.rle"), size, DTYPE]},
+        lambda size: {"rle_expand": [var("water.rle"), size, DTYPE]},
         lambda o, b: b.rle(o["water"]["rle"]),
     ),
     Plane(
@@ -195,13 +207,10 @@ PLANES: tuple[Plane, ...] = (
     Plane(
         "visible",
         "what you can see RIGHT NOW, so a 0 in `water` stops meaning both known-empty and "
-        "never-seen. Not in the observation and not derivable without `tb.dilate`: the unrolled "
-        "kernel costs seven times as much and is wrong at the wrap, which is why the operator "
-        "exists (axon/docs/dialect.md §4).",
-        lambda size: {
-            "tb.dilate": [{"tb.scatter": [var("mine"), size, DTYPE]}, VIEW_RADIUS2]
-        },
-        lambda o, b: b.dilate(b.scatter(o["mine"]), VIEW_RADIUS2),
+        "never-seen. SENT BY THE ENGINE since 14 September 2026 -- the radius is a rule of the "
+        "game and an adapter cannot build the disk union (ants/docs/protocol.md §1).",
+        lambda size: {"rle_expand": [var("vis.rle"), size, DTYPE]},
+        lambda o, b: b.rle(o["vis"]["rle"]),
     ),
 )
 
@@ -215,10 +224,10 @@ N_MOVES = len(MOVES)
 
 
 def encode(obs: dict) -> np.ndarray:
-    """One observation to `[1, planes, rows, cols]`, exactly as the adapter's `in` produces it.
+    """One observation to `[1, planes, rows, cols]`, exactly as the manifest's adapter produces it.
 
-    The leading 1 is the batch dimension the graph declares dynamic, which is what lets Axon stack
-    every seat of a wave into one inference (`axon/tests/fixtures/make-model.py`).
+    The leading 1 is the batch dimension, and the graph declares it dynamic so a trainer can stack
+    a batch through the same graph the ladder runs one seat at a time.
     """
     rows, cols = obs["size"]
     b = Board(rows, cols)

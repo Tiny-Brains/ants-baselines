@@ -1,28 +1,34 @@
-"""`adapter.json`, generated from `planes.py` — never hand-written.
+"""`manifest.json`, generated from `planes.py` — never hand-written.
 
 An artifact nobody hand-edits cannot drift from the thing it was made from. That is the same rule
 `ants/build.sh` applies to `cartridge.json` and `plugin.json`, and it applies here for a sharper
 reason: the adapter is one of the two renderings of the encoding, and the whole anti-skew argument
 collapses if someone can edit one rendering without the other.
 
-    python -m tb_baselines.adapters > adapter.json
+    python -m tb_baselines.adapters > manifest.json
 
-The bytes are what the platform hashes, so this must be **deterministic**: compact separators,
-sorted keys, no trailing newline. Change the spacing and `adapter_hash` moves, which is a new
-submission for a document that means the same thing.
+The bytes are what the platform hashes and half of what it weighs (`S' = artifact_bytes +
+len(manifest)`), so this must be **deterministic**: compact separators, sorted keys, no trailing
+newline. Change the spacing and `manifest_hash` moves, which is a new submission for a document
+that means the same thing.
 
-## The two programs
+## What a manifest is
 
-`in` stacks `planes.PLANES` into one `board` tensor of `[1, planes, rows, cols]`. The size is read
-from the observation rather than written down: three presets mean 64x96, 96x96 and 128x128, and an
-adapter that hard-codes one of them fails the other two at admission.
+Orion's `orion:model@1.0.0`: the model's name, its inputs and outputs with their dtypes and shapes,
+and one JSONLogic **adapter** per input that turns the observation into that input's tensor. It is
+the whole competitor-authored surface — there is no second document.
 
-`out` is the reference adapter's, kept verbatim rather than re-derived. It turns a dense policy map
-`[1, moves, rows, cols]` into one move per ant by flattening the board, computing each ant's flat
-index with a `reduce`, gathering those columns and taking the argmax. It costs about 1,300
-operations and it is the fiddliest thing in the dialect — `reduce`'s seed is the only channel from
-outer scope into a body, which is why the accumulator has to carry the board width along with the
-indices it is building, and why `tb.get` had to exist to get them out again.
+`in` became the `board` input's adapter and `out` is **gone**. The platform reads the head now
+(decision R3): a manifest's `result` expression is evaluated against the output tensors alone, so it
+cannot see the observation and cannot gather at the ants' cells. `tb-match` does the gather, and
+this manifest declares the head shape it will find — `[1, moves, H, W]`, per cell.
+
+## Why the shapes are named
+
+`H` and `W` are variable axes (Orion 1.8.1). A season runs several board sizes and a name binds to
+what the call brings, so one manifest and one loaded session serve 64x96, 96x96 and 128x128 alike.
+`probe_dims` is what admission's five zero-filled inferences run at, and it is set to the largest
+board the catalogue ships: probing the smallest would gate a board nobody plays.
 """
 
 from __future__ import annotations
@@ -30,86 +36,54 @@ from __future__ import annotations
 import json
 import sys
 
-from .planes import MOVES, N_MOVES, N_PLANES, PLANES, DTYPE
+from .planes import DTYPE, N_MOVES, N_PLANES, PLANES
 
-DIALECT = 1
+ABI = "orion:model@1.0.0"
+
+# What the admission probe binds each named axis to. The largest board the cartridge ships, because
+# `probe_ms` is only as representative as the size it was measured at.
+PROBE_DIMS = {"H": 128, "W": 128}
 
 
-def in_program() -> dict:
-    """Observation to `{board: [1, planes, rows, cols]}`."""
+def board_adapter() -> dict:
+    """Observation to the `board` tensor, `[1, planes, H, W]`."""
     size = {"var": "size"}
-    stacked = {"tb.stack": [[p.logic(size) for p in PLANES], 0, DTYPE]}
-    # `merge` builds the shape list at run time: [1, planes] ++ size. `tb.reshape` is metadata only
+    stacked = {"stack": [[p.logic(size) for p in PLANES], 0]}
+    # `merge` builds the shape list at run time: [1, planes] ++ size. `reshape` is metadata only
     # and costs 1, so the leading batch axis is free.
-    return {"board": {"tb.reshape": [stacked, {"merge": [[1, N_PLANES], size]}]}}
+    return {"reshape": [stacked, {"merge": [[1, N_PLANES], size]}]}
 
 
-def out_program() -> dict:
-    """`{policy: [1, moves, rows, cols]}` to one move per ant, positionally aligned with `mine`."""
-    width = {"var": "observation.size.1"}
-    cells = {"*": [{"var": "observation.size.0"}, width]}
-
-    # Each ant's flat index, row-major. The accumulator carries `w` because a reduce body sees only
-    # the element and the accumulator -- the board width is not otherwise in scope in here.
-    flat_indices = {
-        "tb.get": [
+def manifest(name: str = "tb.baseline", version: str = "1") -> dict:
+    return {
+        "abi": ABI,
+        "name": name,
+        "version": version,
+        "format": "onnx",
+        "description": "A TinyBrains Ants entry: seven planes in, a per-cell policy out.",
+        "inputs": [
             {
-                "reduce": [
-                    {"var": "observation.mine"},
-                    {
-                        "idx": {
-                            "merge": [
-                                {"tb.get": [{"var": "accumulator"}, "idx"]},
-                                [
-                                    {
-                                        "+": [
-                                            {
-                                                "*": [
-                                                    {"tb.get": [{"var": "accumulator"}, "w"]},
-                                                    {"var": "current.0"},
-                                                ]
-                                            },
-                                            {"var": "current.1"},
-                                        ]
-                                    }
-                                ],
-                            ]
-                        },
-                        "w": {"tb.get": [{"var": "accumulator"}, "w"]},
-                    },
-                    {"idx": [], "w": width},
-                ]
-            },
-            "idx",
-        ]
+                "name": "board",
+                "dtype": DTYPE,
+                "shape": [1, N_PLANES, "H", "W"],
+                "adapter": board_adapter(),
+            }
+        ],
+        # The head the platform gathers from. `f32` because a policy is scores, not classes, and
+        # the channel order is the game's (`planes.MOVES`).
+        "outputs": [{"name": "policy", "dtype": "f32", "shape": [1, N_MOVES, "H", "W"]}],
+        "probe_dims": PROBE_DIMS,
     }
 
-    per_ant = {
-        "tb.transpose": [
-            {
-                "tb.gather": [
-                    {"tb.reshape": [{"var": "outputs.policy"}, [N_MOVES, cells]]},
-                    flat_indices,
-                    1,
-                ]
-            },
-            [1, 0],
-        ]
-    }
-    return {"map": [{"tb.argmax": [per_ant, 1]}, {"tb.at": [list(MOVES), {"var": ""}]}]}
 
-
-def adapter() -> dict:
-    return {"dialect": DIALECT, "in": in_program(), "out": out_program()}
-
-
-def dumps() -> str:
+def dumps(name: str = "tb.baseline", version: str = "1") -> str:
     """The exact bytes. Sorted and compact, so the same spec always hashes the same."""
-    return json.dumps(adapter(), separators=(",", ":"), sort_keys=True)
+    return json.dumps(manifest(name, version), separators=(",", ":"), sort_keys=True)
 
 
 def main() -> None:
-    sys.stdout.write(dumps())
+    name = sys.argv[1] if len(sys.argv) > 1 else "tb.baseline"
+    sys.stdout.write(dumps(name))
 
 
 if __name__ == "__main__":

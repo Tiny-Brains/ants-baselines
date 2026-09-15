@@ -3,10 +3,10 @@
     python -m tb_baselines.eval models/micro-bc models/nano-bc --boards 4
 
 **Nothing here evaluates a network.** It writes match files and runs `tinybrains <match>`, which
-hosts the cartridge, evaluates the adapter through Axon's own dialect interpreter, runs the graph
-through ORT and writes the same replay envelope Kalam writes. So a result here is a result under the
-rules — the adapter included, the operation budget included, the wrap included — and not a number
-from a training loop that believes its own encoder.
+hosts the cartridge, evaluates the manifest's adapters through datalogic, runs the graph through
+tract and writes the same replay envelope Kalam writes — the same two libraries an Orion node links.
+So a result here is a result under the rules — the adapter included, the operation budget included,
+the wrap included — and not a number from a training loop that believes its own encoder.
 
 That distinction is the whole reason this module is thin. Three gates, and only the last two are
 real:
@@ -43,7 +43,7 @@ class Entrant:
 
     name: str
     weights: Path | None = None
-    adapter: Path | None = None
+    manifest: Path | None = None
     script: list[str] | None = None
 
     def seat(self, index: int) -> dict:
@@ -52,7 +52,7 @@ class Entrant:
             s["script"] = self.script
         else:
             s["weights"] = str(self.weights.resolve())
-            s["adapter"] = str(self.adapter.resolve())
+            s["manifest"] = str(self.manifest.resolve())
         return s
 
 
@@ -186,7 +186,7 @@ def table(records: dict[str, Record]) -> str:
 def entrant_from(path: str) -> Entrant:
     p = Path(path)
     if p.is_dir():
-        return Entrant(name=p.name, weights=p / "model.onnx", adapter=p / "adapter.json")
+        return Entrant(name=p.name, weights=p / "model.onnx", manifest=p / "manifest.json")
     raise SystemExit(f"{path} is not an exported model directory")
 
 
@@ -208,7 +208,7 @@ def main(argv: list[str] | None = None) -> None:
     else:
         print(table(records))
         print()
-        print("Played under the rules -- adapter, operation budget and wrap included.")
+        print("Played under the rules -- the manifest, the operation budget and the wrap included.")
         print("It is not the ladder: no ratings, no seasons, and no trial.")
 
 

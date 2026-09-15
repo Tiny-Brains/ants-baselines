@@ -11,7 +11,7 @@ here because a training env never forfeits a seat, so every live seat is played 
         step = env.step(orders)
 
 `Step.boards` is already encoded by `planes.encode` — the same function
-`tests/test_adapter_conformance.py` proves equal to `adapter.json`. `Step.observations` is the raw
+`tests/test_adapter_conformance.py` proves equal to `manifest.json`. `Step.observations` is the raw
 JSON beside it, because reward is computed from the game and not from the tensor.
 
 ## What this is not
@@ -69,8 +69,8 @@ class Group:
     **A batch is per board size, and that is not an implementation detail.** The pool holds several
     waves, `worldgen` takes one preset a wave, and the three presets are three sizes — 64x96, 96x96
     and 128x128. The policy is fully convolutional so it runs on any of them, but a single tensor
-    cannot hold two. A trainer loops the groups; so does Axon, which batches rows by
-    `weights_hash` *and* by agreeing shape.
+    cannot hold two, so a trainer loops the groups. The ladder never has this problem: a match is
+    two seats and each is its own `model_infer` call.
     """
 
     size: tuple[int, int]
@@ -151,7 +151,10 @@ class Env:
         # Every model card names these. A run that cannot say which engine produced its data is a
         # run nobody can reproduce.
         self.engine_digest = self.hello["engine_digest"]
-        self.evaluator_digest = self.hello["evaluator_digest"]
+        # The evaluator is datalogic now and is named by version rather than digest: an adapter is
+        # priced and run by the same library on a node, so a version skew is what would make a
+        # local pass and a remote refusal disagree.
+        self.evaluator = self.hello["evaluator"]
 
     # ---- the wire ------------------------------------------------------------------
 

@@ -18,7 +18,7 @@ Two axes, and they do not cross cleanly:
 - **The method column** — several learners on one class and one dataset, so the comparison is
   between algorithms rather than between algorithms *and* budgets at once.
 
-`models/<class>-<method>/` holds each finished artifact: `model.onnx`, the generated `adapter.json`,
+`models/<class>-<method>/` holds each finished artifact: `model.onnx`, the generated `manifest.json`,
 a `metrics.json` of what the platform said about it, and a `card.md` a person can read.
 
 ## Working here needs three sibling checkouts
@@ -28,7 +28,6 @@ tinybrains/
   ants-baselines/   <- you are here
   ants/             <- games.toml resolves the cartridge from ../ants
   devops/           <- the `tinybrains` CLI is built from devops/cli
-  axon/             <- devops/cli depends on it by path
 ```
 
 ```sh
@@ -63,13 +62,13 @@ env. Never report a result from the env as a result.
 ## What must stay true
 
 - **`planes.py` is the only definition of the encoding, and it is rendered twice.** The numpy
-  encoder trains the network; `adapters.py` generates the `adapter.json` the ladder runs. Two
+  encoder trains the network; `adapters.py` generates the `manifest.json` the ladder runs. Two
   implementations of one encoding is how a model scores worse in the arena than in training, and it
   fails *silently*. `tests/test_adapter_conformance.py` runs the real evaluator (`tinybrains adapt`,
-  which is Axon's dialect interpreter) over the cartridge's reference observations and asserts they
-  agree element for element. **It is the most important test here.** It has already caught a plane
-  filter inverted and a dilation radius off by five.
-- **`adapter.json` is generated and never hand-edited.** Same rule as `ants/build.sh`'s manifests,
+  which is **datalogic**, the evaluator an Orion node runs the manifest on) over the cartridge's
+  reference observations and asserts they agree element for element. **It is the most important
+  test here.** It has already caught a plane filter inverted and a dilation radius off by five.
+- **`manifest.json` is generated and never hand-edited.** Same rule as `ants/build.sh`'s manifests,
   for a sharper reason: editing one rendering of the encoding without the other is exactly the bug
   the conformance test exists to catch, and a hand-edit is how it gets reintroduced.
 - **Numbers in `classes.toml` are measured, and the measurement is written down beside them.**
@@ -95,21 +94,26 @@ env. Never report a result from the env as a result.
   [`docs/receptive-field.md`](docs/receptive-field.md), and it is the one to read first. Dilation is
   an attribute of `Conv`, not an operator, so it needs nothing the allowlist does not have.
 
-- **fp16 initializers are free capacity.** A `Cast` back to float32 at each use, which ORT
-  constant-folds at graph optimisation, so the *file* halves and the runtime does not change:
+- **fp16 initializers are free capacity.** A `Cast` back to float32 at each use, which the runtime
+  constant-folds when it optimises the graph, so the *file* halves and the runtime does not change:
   **2.03x the parameters for the same weight class**, identical play over 396 per-ant orders, same
-  three operators. There is no reason to ship fp32.
-- **Above `mini` the turn deadline binds before the byte cap does.** A row owns `turn_ms / rows` of
-  a play call — 31.2 ms at Kalam's `wave_k` of 16 — and `small` reaches that at about a quarter of
-  its four-megabyte cap. `export.py` refuses an artifact over 70% of a seat's share, which is the
-  check that turns this from a paragraph into a gate.
+  three operators. It matters more under `S'` than it did under `S`, because `S'` is the artifact's
+  raw bytes rather than a compression of its initializers. There is no reason to ship fp32.
+- **Above `mini` the turn deadline binds before the byte cap does.** A seat owns the **whole** turn
+  since the wave went — one `model_infer` per seat, each with its own `timeout_ms` (decision R7) —
+  so the share is 1000 ms rather than the 31.2 ms a 16-row wave divided out. `export.py` still
+  refuses an artifact over 70% of that share, which is the check that turns this from a paragraph
+  into a gate, and the margin is deliberate: a model needing 95% of the clock here has nothing left
+  for a slower host.
 - **`ConvTranspose` is not on the operator allowlist.** `Resize` is the upsampler.
 - **The board wraps, and padding costs.** Wrapping before every convolution measured 2.3x the FLOP
   model; one wrap per resolution stage is the same arithmetic for a third of the copying.
 - **A batch is per board size.** Three presets are three sizes (64x96, 96x96, 128x128) and one
   tensor cannot hold two. `Step.groups` is that, and `Step.boards` raises rather than silently
   handing back a fraction of the batch.
-- **`dilate` scatters from the ants, it does not roll the plane.** The obvious reading of
-  `tb.dilate` — shift the board by all 241 disk offsets and OR — was 48% of the training loop at
-  1.86 million `np.roll` calls. Walking the disk out from each set cell is the same answer for 8,700
-  writes instead of 3.9 million.
+- **`dilate` scatters from the ants, it does not roll the plane.** The obvious reading — shift the
+  board by all 241 disk offsets and OR — was 48% of the training loop at 1.86 million `np.roll`
+  calls. Walking the disk out from each set cell is the same answer for 8,700 writes instead of 3.9
+  million. **It is no longer part of the encoding**: the cartridge sends `vis` (decision R5), so
+  `planes.py` reads it with the same `rle_expand` it uses for `water`. The function is kept because
+  it is what proves the engine's mask is the mask the trainer used to derive.

@@ -4,7 +4,7 @@
 of the class ladder is to take one fixed teacher and ask how much of it fits in 8 KiB, in 64 KiB, in
 512 KiB — and that question is only meaningful if the teacher is the same for every class and if it
 is a player rather than a network. Distilling a heuristic is also the fastest honest way to get a
-ladder something to play against; `axon`'s untrained fixtures hold still and teach nobody anything.
+ladder something to play against; an untrained fixture holds still and teaches nobody anything.
 
 It is a *player*, not a second engine. It reads the observation the protocol defines and answers a
 move — the same thing a competitor's model does. It implements no rule: it never decides who dies,

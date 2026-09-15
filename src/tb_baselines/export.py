@@ -1,17 +1,18 @@
 """Torch to a submittable artifact: ONNX, fp16 initializers, and the platform's own verdict.
 
 The last step is not a check this repository invents. It shells out to `tinybrains check --json`,
-which is Axon's `/inspect` and `/validate` in the same crate the fleet runs — so "does it fit its
-class" is answered by the code that will actually answer it, over the cartridge's own reference
-observations. What this module adds is the loop around that: build, measure, and refuse an artifact
+which reads the graph the way admission reads it and runs the manifest on the evaluator a node runs
+it on — so "does it fit its class" is answered against the same measurements the platform will make,
+over the cartridge's own reference observations. What this module adds is the loop around that: build, measure, and refuse an artifact
 that misses its class.
 
     python -m tb_baselines.export --class micro --weights runs/micro-bc/best.pt --out models/micro-bc
 
-Every export writes three files beside the model: `adapter.json` (generated, never edited),
+Every export writes three files beside the model: `manifest.json` (generated, never edited),
 `metrics.json` (what the platform said), and `card.md` (what a person needs to reproduce it). The
-card names the **engine digest** and the **evaluator digest**, because a baseline that cannot say
-which engine it was trained against is a baseline nobody can reproduce.
+card names the **engine digest**, because a baseline that cannot say which engine it was trained
+against is a baseline nobody can reproduce. (It used to name an evaluator digest too; the evaluator
+is datalogic now, and `tinybrains games` prints the version this binary links.)
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ def budget(name: str) -> dict:
     # is not the artifact's fault.
     fraction = spec.get("fraction", doc["target"]["fraction"])
     target = int(spec["max_bytes"] * fraction)
-    weights = target - doc["metric"]["adapter_zstd_bytes"]
+    weights = target - doc["metric"]["manifest_bytes"]
     c = doc["compute"]
     return {
         "name": name,
@@ -77,10 +78,11 @@ def budget(name: str) -> dict:
 def to_onnx(trunk: torch.nn.Module, path: Path, planes: int = N_PLANES) -> None:
     """The policy half only.
 
-    `board` and `policy` both declare a dynamic leading dimension, which is what makes the graph
-    *batchable*: Axon stacks every row of a wave that shares a `weights_hash` into one inference,
-    and a graph without that axis costs one inference a seat. H and W are dynamic too, because the
-    three presets are three board sizes.
+    H and W are dynamic because the three presets are three board sizes, and the manifest declares
+    them as the named axes `"H"` and `"W"` -- one admitted session then serves every board a season
+    runs. The leading axis is dynamic too and the manifest pins it at 1: a match is two seats and
+    each is its own `model_infer` call, so nothing batches, but leaving the axis symbolic in the
+    graph costs nothing and keeps the artifact usable in a trainer that does.
     """
     trunk.eval()
     example = torch.zeros(1, planes, 128, 128, dtype=torch.int8)
@@ -100,11 +102,12 @@ def to_onnx(trunk: torch.nn.Module, path: Path, planes: int = N_PLANES) -> None:
 def halve(path: Path) -> None:
     """Rewrite every float32 initializer as float16, with a `Cast` back at its use.
 
-    The size metric compresses **initializer data**, so this halves what the class is measured on.
-    The graph's compute dtype is untouched: ORT constant-folds `Cast(initializer)` during graph
-    optimisation, so the fp32 tensor is rebuilt once at session load and never per inference.
+    The size metric is the artifact's raw bytes, so this halves what the class is measured on --
+    and more directly than it used to, when the metric compressed the initializer data first. The
+    graph's compute dtype is untouched: the runtime constant-folds `Cast(initializer)` as it
+    optimises the graph, so the fp32 tensor is rebuilt once at session load and never per inference.
 
-    Measured 10 September 2026: 2.03x the parameters for the same S, no measurable change in
+    Measured 10 September 2026: 2.03x the parameters for the same class, no measurable change in
     inference time, the same three operators, and 396 of 396 per-ant orders identical to the fp32
     graph over three played matches.
     """
@@ -147,10 +150,10 @@ def cli() -> str:
     return found
 
 
-def verdict(model: Path, adapter: Path) -> dict:
-    """`tinybrains check --json`: Axon's own inspect and validate, over the reference set."""
+def verdict(model: Path, manifest: Path) -> dict:
+    """`tinybrains check --json`: the node's own evaluator and runtime, over the reference set."""
     r = subprocess.run(
-        [cli(), "check", str(model), str(adapter), "--json"],
+        [cli(), "check", str(model), str(manifest), "--json"],
         cwd=ROOT, capture_output=True, text=True,
     )
     if not r.stdout.strip():
@@ -161,65 +164,62 @@ def verdict(model: Path, adapter: Path) -> dict:
 def certify(name: str, said: dict) -> list[str]:
     """Everything wrong with this artifact, in the order a person would want to hear it."""
     b = budget(name)
-    ins, val = said["inspect"], said["validate"]
-    size = ins["size_metric_bytes"]
+    size = said["size_metric_bytes"]
     problems = []
 
     if not said["ok"]:
         problems.append(
-            f"the platform refused it: {val.get('reason')} {val.get('detail') or ''}".strip()
+            f"the platform refused it: {said.get('reason') or 'unstated'}".strip()
         )
     if size > b["max_bytes"]:
         problems.append(
-            f"S is {size:,} bytes and {name} caps at {b['max_bytes']:,} -- over by "
+            f"S' is {size:,} bytes and {name} caps at {b['max_bytes']:,} -- over by "
             f"{size - b['max_bytes']:,}"
         )
-    if ins["unsupported_ops"]:
-        problems.append(f"operators outside the allowlist: {', '.join(ins['unsupported_ops'])}")
     # The deadline, made a check rather than a paragraph. Above `mini` this is what refuses an
     # artifact, and the byte cap never gets a say.
-    share = val["infer_us_max"] / b["share_us"]
+    #
+    # A SEAT'S SHARE IS THE WHOLE TURN since the wave went (decision R7): one `model_infer` per
+    # seat, each with its own deadline, so there is no shared call to divide. `budget()` keeps the
+    # fraction this repository holds itself to, which is a self-imposed margin and not the
+    # platform's rule.
+    share = said["infer_us_max"] / b["share_us"]
     if share > b["max_share"]:
         problems.append(
             f"it spends {share:.0%} of a seat's {b['share_us'] / 1000:.1f} ms deadline share at the "
             f"worst reference board, over the {b['max_share']:.0%} this repository allows. The class "
             f"has bytes left; the turn does not."
         )
-    # Batchability is not something `check` reports, so read it off the declared shape: a leading
-    # dimension that is not dynamic means one inference per seat instead of one per wave.
-    board = next((p for p in ins["inputs"] if p["name"] == "board"), None)
-    if board and isinstance(board["shape"][0], int):
-        problems.append(
-            "the graph fixes its leading dimension, so it cannot batch -- every seat costs its own "
-            "inference. Export with a dynamic axis 0."
-        )
     return problems
 
 
 def report(name: str, said: dict) -> dict:
     b = budget(name)
-    ins, val = said["inspect"], said["validate"]
+    g = said["graph"]
     return {
         "class": name,
-        "size_metric_bytes": ins["size_metric_bytes"],
+        # S' = artifact_bytes + len(manifest) (decision R4). Both terms are what a node measures
+        # against a digest it re-hashes, so neither can be understated by where the weights sit --
+        # which the old zstd-of-initializers metric could be, and was.
+        "size_metric_bytes": said["size_metric_bytes"],
         "class_max_bytes": b["max_bytes"],
         "class_target_bytes": b["target_bytes"],
-        "fill_of_cap": round(ins["size_metric_bytes"] / b["max_bytes"], 4),
-        "weights_zstd_bytes": ins["weights_zstd_bytes"],
-        "adapter_zstd_bytes": ins["adapter_zstd_bytes"],
-        "params": ins["params"],
-        "opset": ins["opset"],
-        "operators": ins["ops"],
-        "adapter_ops_max": val["ops_max"],
+        "fill_of_cap": round(said["size_metric_bytes"] / b["max_bytes"], 4),
+        "artifact_bytes": said["artifact_bytes"],
+        "manifest_bytes": said["manifest_bytes"],
+        "params": g["parameters"],
+        "nodes": g["nodes"],
+        "opset": g["opset"],
+        "operators": g["operators"],
+        "adapter_ops_max": said["ops_max"],
         "adapter_ops_budget": said["budget_ops"],
-        "infer_us_max": val["infer_us_max"],
+        "infer_us_max": said["infer_us_max"],
         "deadline_share_ms": round(b["share_us"] / 1000, 2),
-        "share_used": round(val["infer_us_max"] / b["share_us"], 4),
+        "share_used": round(said["infer_us_max"] / b["share_us"], 4),
         "target_fraction": b["fraction"],
         "engine_digest": said["engine_digest"],
-        "evaluator_digest": val["evaluator_digest"],
         "weights_hash": said["weights_hash"],
-        "adapter_hash": said["adapter_hash"],
+        "manifest_hash": said["manifest_hash"],
     }
 
 
@@ -234,12 +234,11 @@ CARD = """# {name}
 | Architecture | `{arch}`, receptive field **{reach} cells** each way{dil} |
 | Method | {method} |
 | Adapter | {ops:,} of {opsmax:,} operations at its worst reference case |
-| Inference | {infer:.2f} ms at the worst reference case — **{shareuse:.0%}** of a {share:.1f} ms seat share |
+| Inference | {infer:.2f} ms at the worst reference case — **{shareuse:.1%}** of the {share:.0f} ms a seat gets |
 | Operators | {operators} |
 | Engine | `{engine}` |
-| Evaluator | `{evaluator}` |
 | Model hash | `{whash}` |
-| Adapter hash | `{ahash}` |
+| Manifest hash | `{ahash}` |
 
 {notes}
 
@@ -247,7 +246,8 @@ Reproduce with `{repro}`.
 
 Inference time is measured on whatever machine ran the check and is **reported, never a gate**:
 there is no compute cap (devops decision 46). It is here because the turn deadline is what a graph
-too expensive to play runs into, and a seat's share of it is `turn_ms / rows in the call`.
+too expensive to play runs into, and a seat's share of it is the WHOLE turn -- one `model_infer`
+call per seat, each with its own deadline (decision R7).
 """
 
 
@@ -265,8 +265,8 @@ def write_card(out: Path, name: str, method: str, metrics: dict, summary: str,
         infer=metrics["infer_us_max"] / 1000, share=metrics["deadline_share_ms"],
         shareuse=metrics["share_used"],
         operators=", ".join(metrics["operators"]), engine=metrics["engine_digest"],
-        evaluator=metrics["evaluator_digest"], whash=metrics["weights_hash"],
-        ahash=metrics["adapter_hash"], notes=notes, repro=repro,
+        whash=metrics["weights_hash"], ahash=metrics["manifest_hash"],
+        notes=notes, repro=repro,
     ))
 
 
@@ -291,13 +291,13 @@ def export(trunk: torch.nn.Module, name: str, out: Path, method: str,
            summary: str = "", notes: str = "", repro: str = "") -> dict:
     """The whole pipeline. Raises if the artifact misses its class."""
     out.mkdir(parents=True, exist_ok=True)
-    model_path, adapter_path = out / "model.onnx", out / "adapter.json"
-    adapter_path.write_text(adapters.dumps())
+    model_path, manifest_path = out / "model.onnx", out / "manifest.json"
+    manifest_path.write_text(adapters.dumps(f"tb.{out.name}"))
     to_onnx(trunk, model_path)
     if classes()["_"]["dtype"]["default"] == "fp16":
         halve(model_path)
 
-    said = verdict(model_path, adapter_path)
+    said = verdict(model_path, manifest_path)
     problems = certify(name, said)
     metrics = report(name, said) | shape_of(trunk)
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")

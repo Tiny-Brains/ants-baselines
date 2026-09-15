@@ -37,7 +37,7 @@ def test_hello_names_the_engine_and_the_evaluator(env):
     """A run that cannot say which engine produced its data cannot be reproduced, and an engine
     change is a rules change."""
     assert env.engine_digest.startswith("sha256:")
-    assert env.evaluator_digest.startswith("sha256:")
+    assert env.evaluator.startswith("datalogic "), "the evaluator is named by version now"
     assert env.hello["max_turns"] == 40
 
 

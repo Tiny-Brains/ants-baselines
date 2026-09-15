@@ -42,7 +42,6 @@ tinybrains/
   ants-baselines/   <- you are here
   ants/             <- the cartridge; games.toml resolves it from ../ants
   devops/           <- the `tinybrains` CLI, which is the whole toolchain
-  axon/             <- devops/cli depends on it by path
 ```
 
 ## Interface
@@ -51,7 +50,7 @@ What this repository produces, and what reads it:
 
 | Artifact | Read by |
 |---|---|
-| `models/<class>-<method>/model.onnx` + `adapter.json` | a GitHub release; admission fetches both |
+| `models/<class>-<method>/model.onnx` + `manifest.json` | a GitHub release, and a presigned PUT; admission reads both from the bucket |
 | `models/<class>-<method>/metrics.json` | the seeding script, for `size_bytes`, `param_count`, `infer_us` |
 | `models/<class>-<method>/card.md` | people |
 
@@ -70,13 +69,13 @@ python -m tb_baselines.eval models/micro-bc models/nano-bc --boards 3
 
 ### The one test that matters
 
-A competitor training in Python encodes each observation twice: once in `adapter.json`, which is
+A competitor training in Python encodes each observation twice: once in `manifest.json`, which is
 what the ladder runs, and once in numpy, which is what the optimiser sees. When those two disagree,
 both halves work and the model simply scores worse in the arena than its training curve promised.
 Nothing tells you.
 
 So the encoding is declared once, in [`planes.py`](src/tb_baselines/planes.py), with both renderings
-side by side — and `tests/test_adapter_conformance.py` runs **Axon's own dialect evaluator** over the
+side by side — and `tests/test_adapter_conformance.py` runs **datalogic, the evaluator a node runs an adapter on**, over the
 cartridge's own reference observations and asserts they agree element for element. If you take one
 idea from this repository, take that one.
 
@@ -106,7 +105,7 @@ accounts the season also lists as participants.
 classes.toml                    the class table: every number, and its measurement
 src/tb_baselines/
   planes.py                     THE encoding, rendered twice
-  adapters.py                   generates adapter.json from planes.py
+  adapters.py                   generates manifest.json from planes.py
   env.py                        client for `tinybrains env`
   teacher.py                    the scripted bot the class ladder is distilled from
   collect.py                    teacher rollouts to a dataset
@@ -128,7 +127,7 @@ Dilating the convolutions took micro from 47.2% to 91.1% with fewer parameters.
 
 ## What must stay true
 
-- **`adapter.json` is generated, never hand-edited.** It is one of two renderings of the encoding;
+- **`manifest.json` is generated, never hand-edited.** It is one of two renderings of the encoding;
   editing it alone reintroduces exactly the skew the conformance test exists to catch.
 - **The teacher never ships.** It is a label source. Changing it invalidates the class ladder, which
   is only a comparison because every class distils the same one.
@@ -153,22 +152,30 @@ About 10 of the 13 seconds are now the convolutions themselves. The env is no lo
 `tinybrains env`'s parallel waves and the faster engine the same run is 13 / 13 / 13 s, with losses
 equal to the digit.
 
-**10 September 2026 — the pipeline is built, three artifacts ship, and the class ladder measures
-something.**
+**15 September 2026 — the pipeline is built, three artifacts ship on the manifest contract, and the
+class ladder measures something.**
 
-| | class | parameters | S | reach | agreement | on the ladder |
+| | class | parameters | S' | reach | agreement | on the ladder |
 |---|---|---:|---:|---:|---:|---|
-| `micro-bc` | micro | 24,001 | 45,642 (70% of cap) | 15 | 93.8% | yes |
-| `nano-bc` | nano | 2,930 | 6,007 (73% of cap) | 15 | 85.8% | yes |
-| `micro-percell` | micro | 24,953 | 45,942 (70% of cap) | 0 | 40.7% | the control |
+| `micro-bc` | micro | 24,077 | 54,426 (42% of cap) | 15 | 93.8% | yes |
+| `nano-bc` | nano | 3,006 | 12,280 (75% of cap) | 15 | 85.8% | yes |
+| `micro-percell` | micro | 24,993 | 52,732 (40% of cap) | 0 | 40.7% | the control |
+
+**Every number in that table moved and none of the models did.** `parameters` counts every value
+the ONNX document carries now — initializers, node attributes, subgraph bodies — rather than
+initializers alone, which is the hole a graph could duck through by exporting its weights as
+`Constant` nodes. `S'` is `artifact_bytes + len(manifest)`, raw where the old `S` compressed the
+initializers, and the class caps doubled with it so the parameter budget each class was calibrated
+for is the one it still has.
 
 micro takes nano two to one over 24 matches, which is the size/fidelity curve the weight classes
 exist to measure. Both are distilled from one deterministic teacher over 250,000 seat-turns and
 7.4 million ant decisions.
 
-Verified end to end on a live stack: seeded, resident on both fleet replicas, claimed by the wave,
-523 turns played with zero strikes, replay uploaded, rated 25.00 → 29.40, and visible through
-`GET /v1/models/{id}` with its measured `infer_us`.
+Verified end to end on a live stack: seeded, registered and activated on each replica by its own
+`tb-roster` clock, claimed one row at a time by `tb-match`, played with zero strikes, replay
+uploaded, ratings folded by count, and visible through `GET /v1/models/{id}` with its measured
+`infer_us`.
 
 Settled by measurement: **fp16 initializers give 2.03x the parameters** for the same class with
 identical play; **the turn deadline binds before the byte cap above `mini`**; and **receptive field,

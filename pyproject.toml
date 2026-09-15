@@ -7,8 +7,8 @@ dependencies = [
     "numpy>=1.26",
     "torch>=2.2",
     # Graph surgery only: the fp16 initializer rewrite in export.py. The graph is never RUN here --
-    # `tinybrains check` runs it, through Axon and the same ORT the fleet uses, which is what keeps
-    # this repository from acquiring a second opinion about what its own model does.
+    # `tinybrains check` runs it, through the same datalogic and tract the fleet uses, which is what
+    # keeps this repository from acquiring a second opinion about what its own model does.
     "onnx>=1.16",
 ]
 
