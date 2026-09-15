@@ -83,7 +83,7 @@ idea from this repository, take that one.
 
 Nothing at run time. These are ordinary submissions.
 
-At seed time, `devops/compose/db-init/30-seed.sql` names this repository and a release tag, and the
+At seed time, `devops/compose/bootstrap/seed.sql` names this repository and a release tag, and the
 seeding script needs each artifact's `metrics.json` for the values admission would otherwise have
 measured.
 
